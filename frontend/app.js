@@ -2587,6 +2587,7 @@ async function initAssessment(subjectId) {
   const quickRepliesEl = document.getElementById('assessQuickReplies');
   const assessHintEl = document.getElementById('assessHint');
   const assessmentObjectiveEl = document.getElementById('assessmentObjective');
+  let assessmentGenerating = false;
 
   const subject = state.subjects.find(s => s.id === subjectId);
   const subjectName = subject ? subject.name : '学习';
@@ -2798,10 +2799,8 @@ async function initAssessment(subjectId) {
         renderInlineQuickReplies(botEl, nextReplies, reply => void sendChat(reply));
         assessState.chatHistory.push({ role: 'assistant', content: message || botText, quickReplies: nextReplies });
         const nextStage = updateAssessmentObjective();
-        if (nextStage.readyForTest) {
-          toTestBtn.style.display = 'inline-flex';
-        }
         await persistTeachingSession(subjectId, { assessment: assessState });
+        if (nextStage.readyForTest) await startTest();
       } else {
         throw new Error('模型没有返回可显示的内容');
       }
@@ -2818,10 +2817,12 @@ async function initAssessment(subjectId) {
       }
     } finally {
       statusTimers.forEach(clearTimeout);
-      sendBtn.disabled = false;
-      inputEl.disabled = false;
-      if (assessHintEl) assessHintEl.textContent = '如实回答即可，这里不计分';
-      inputEl.focus();
+      if (assessState.phase === 'chat' && !assessmentGenerating) {
+        sendBtn.disabled = false;
+        inputEl.disabled = false;
+        if (assessHintEl) assessHintEl.textContent = '如实回答即可，这里不计分';
+        inputEl.focus();
+      }
     }
   }
 
@@ -2832,6 +2833,8 @@ async function initAssessment(subjectId) {
   });
   // 进入测试阶段
   async function startTest() {
+    if (assessmentGenerating || assessState.phase !== 'chat') return;
+    assessmentGenerating = true;
     toTestBtn.style.display = 'none';
     sendBtn.style.display = 'none';
     inputEl.placeholder = '正在出题中...';
@@ -2845,7 +2848,7 @@ async function initAssessment(subjectId) {
 
     // 添加一个提示
     const tipEl = document.createElement('div');
-    tipEl.className = 'reasoning';
+    tipEl.className = 'reasoning assessment-generation-state';
     tipEl.innerHTML = `<div class="label">${ICONS.clipboard} 正在生成摸底测试题...</div><div class="loading-dots"><span></span><span></span><span></span></div>`;
     messagesEl.appendChild(tipEl);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -2865,6 +2868,7 @@ async function initAssessment(subjectId) {
       if (!validation.valid) throw new Error(validation.error);
       assessState.questions = result.questions;
       assessState.phase = 'testing';
+      assessmentGenerating = false;
       assessState.currentQ = 0;
       await persistTeachingSession(subjectId, { assessment: assessState });
 
@@ -2872,7 +2876,12 @@ async function initAssessment(subjectId) {
       renderTestQuestion(messagesEl, assessState, subjectId, inputEl, sendBtn);
 
     } catch (e) {
-      tipEl.innerHTML = `<div class="label">${ICONS.warning} 出题失败</div><div>${e.toString()}</div>`;
+      assessmentGenerating = false;
+      tipEl.innerHTML = `<div class="label">${ICONS.warning} 出题失败</div><div>${escapeHtml(e.toString())}</div><button class="btn-secondary assessment-retry-generate" type="button">重新生成测验</button>`;
+      tipEl.querySelector('.assessment-retry-generate')?.addEventListener('click', () => {
+        tipEl.remove();
+        void startTest();
+      });
       inputEl.disabled = false;
       sendBtn.style.display = '';
     }
@@ -3102,7 +3111,9 @@ async function initAssessment(subjectId) {
   if (assessState.phase === 'testing' && assessState.questions.length) {
     renderTestQuestion(messagesEl, assessState, subjectId, inputEl, sendBtn);
   } else if (assessState.phase === 'chat' && assessState.chatHistory.length >= 7) {
-    toTestBtn.style.display = 'inline-flex';
+    const restoredStage = updateAssessmentObjective();
+    if (restoredStage.readyForTest) queueMicrotask(() => void startTest());
+    else toTestBtn.style.display = 'inline-flex';
   }
   inputEl.focus();
 }

@@ -464,6 +464,10 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("reuseStudent", self.js)
         self.assertIn(".assessment-request-error", self.css)
         self.assertIn(".assess-phase .teacher-move-footer", self.css)
+        self.assertIn("assessmentGenerating", self.js)
+        self.assertIn("if (nextStage.readyForTest) await startTest()", self.js)
+        self.assertIn("assessment-retry-generate", self.js)
+        self.assertIn("assessment-generation-state", self.css)
         self.assertIn("previousRow?.classList.contains(roleClass)", self.js)
         self.assertIn("message-content message-segment", self.js)
 
