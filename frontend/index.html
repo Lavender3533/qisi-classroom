@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>启思学堂</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#view">跳到学习工作区</a>
+
+  <div class="shell workbench" id="workbench">
+    <header class="titlebar">
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <span class="app-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z"/>
+            <path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z"/>
+          </svg>
+        </span>
+        <span class="titlebar-text">启思学堂</span>
+      </div>
+
+      <nav class="desktop-menu" aria-label="应用菜单">
+        <button class="menu-item" type="button" data-menu="file" aria-haspopup="menu" aria-expanded="false">文件</button>
+        <button class="menu-item" type="button" data-menu="view" aria-haspopup="menu" aria-expanded="false">视图</button>
+        <button class="menu-item" type="button" data-menu="learning" aria-haspopup="menu" aria-expanded="false">学习</button>
+        <button class="menu-item" type="button" data-menu="help" aria-haspopup="menu" aria-expanded="false">帮助</button>
+      </nav>
+
+      <button class="command-center" id="commandCenter" type="button" aria-label="打开命令中心，快捷键 Ctrl+K">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/>
+          <path d="m20 20-4-4"/>
+        </svg>
+        <span>搜索课程或运行命令</span>
+        <kbd>Ctrl K</kbd>
+      </button>
+
+      <div class="titlebar-drag-fill" data-tauri-drag-region></div>
+
+      <div class="titlebar-controls">
+        <button class="titlebar-btn" id="btnMinimize" type="button" title="最小化" aria-label="最小化窗口">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6.5h9"/></svg>
+        </button>
+        <button class="titlebar-btn" id="btnMaximize" type="button" title="最大化" aria-label="最大化或还原窗口">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="1.75" y="1.75" width="8.5" height="8.5" rx=".6"/></svg>
+        </button>
+        <button class="titlebar-btn titlebar-btn-close" id="btnClose" type="button" title="关闭" aria-label="关闭窗口">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m2 2 8 8M10 2 2 10"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="desktop-menu-popover" id="desktopMenuPopover" role="menu" hidden></div>
+
+    <nav class="ribbon activity-bar" id="activityBar" aria-label="主要功能">
+      <div class="ribbon-top" id="ribbonTop"></div>
+      <div class="ribbon-bottom" id="ribbonBottom"></div>
+    </nav>
+
+    <aside class="sidebar primary-sidebar" id="primarySidebar" aria-label="功能侧栏">
+      <div class="sidebar-head">
+        <div>
+          <div class="panel-kicker">工作区</div>
+          <h1 class="sidebar-title" id="sidebarTitle">课堂</h1>
+        </div>
+        <button class="icon-btn panel-action" id="sidebarAdd" type="button" title="新增" aria-label="新增科目">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+        </button>
+      </div>
+      <div class="sidebar-context">
+        <span class="context-label">科目</span>
+        <span class="context-count" id="sidebarCount">0</span>
+      </div>
+      <div class="sidebar-body" id="sidebarBody"></div>
+    </aside>
+
+    <div class="panel-resizer panel-resizer-sidebar" id="sidebarResizer" role="separator" aria-label="调整主侧栏宽度" aria-orientation="vertical" tabindex="0"></div>
+
+    <main class="workspace editor-group" id="editorGroup">
+      <div class="editor-topline">
+        <button class="icon-btn panel-action" id="sidebarToggle" type="button" title="切换主侧栏 (Ctrl+B)" aria-label="折叠或展开主侧栏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="1.5"/>
+            <path d="M8 4v16"/>
+          </svg>
+        </button>
+        <div class="editor-breadcrumb" id="editorBreadcrumb" aria-live="polite">
+          <span>课堂</span><span class="breadcrumb-separator">/</span><span>选择一个科目</span>
+        </div>
+        <button class="icon-btn panel-action" id="inspectorToggle" type="button" title="切换学习检查器 (Ctrl+Shift+I)" aria-label="折叠或展开学习检查器">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="1.5"/>
+            <path d="M16 4v16"/>
+          </svg>
+        </button>
+      </div>
+      <div class="tabbar" id="tabbar" role="tablist" aria-label="已打开的学习标签">
+        <div class="tab active welcome-tab" role="tab" aria-selected="true" tabindex="0">
+          <span class="tab-dot" aria-hidden="true"></span>
+          <span class="tab-title">欢迎</span>
+        </div>
+      </div>
+      <section class="view" id="view" tabindex="-1" aria-label="学习内容">
+        <div class="placeholder">
+          <div class="ph-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z"/>
+              <path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z"/>
+            </svg>
+          </div>
+          <h2>选择科目，开始课堂</h2>
+          <p>创建真实科目后，课堂会在新的编辑器标签中打开。</p>
+          <div class="welcome-actions">
+            <button type="button" class="welcome-action primary" data-workbench-action="new-subject">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z"/>
+              </svg>
+              <span>新建科目</span>
+            </button>
+            <button type="button" class="welcome-action" data-workbench-action="command-center">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <span>命令中心</span><kbd>Ctrl+K</kbd>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="panel-resizer panel-resizer-inspector" id="inspectorResizer" role="separator" aria-label="调整学习检查器宽度" aria-orientation="vertical" tabindex="0"></div>
+
+    <aside class="rightpanel inspector" id="rightPanel" aria-label="学习检查器">
+      <div class="sidebar-head inspector-head">
+        <div class="inspector-tabs">
+          <button class="inspector-tab active" data-tab="profile" type="button">学习档案</button>
+          <button class="inspector-tab" data-tab="files" type="button" id="fileTreeTab" style="display:none">文件</button>
+        </div>
+        <button class="icon-btn panel-action" id="rightClose" type="button" title="收起检查器" aria-label="收起学习检查器">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m15 18-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="sidebar-body inspector-body" id="rightBody">
+        <section class="profile-card">
+          <div class="profile-field">
+            <div class="pf-label">当前科目</div>
+            <div class="pf-value">尚未选择科目</div>
+          </div>
+          <div class="profile-field">
+            <div class="pf-label">学习记录</div>
+            <p class="profile-persona">选择科目后显示课堂状态、互动和真实学习记录。</p>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <footer class="statusbar">
+      <div class="status-left">
+        <button class="status-item status-connection" type="button" aria-label="AI 连接状态">
+          <span class="dot connecting" id="statusDot" aria-hidden="true"></span>
+          <span id="statusText">连接中…</span>
+        </button>
+        <span class="status-divider" aria-hidden="true"></span>
+        <span class="status-item" id="statusSubject">未选择科目</span>
+        <span class="status-item" id="statusLesson">准备课堂</span>
+      </div>
+      <div class="status-right">
+        <span class="status-item">本地数据</span>
+        <span class="status-item" id="statusModel">mimo-v2.5-pro</span>
+        <button class="status-item status-shortcut" type="button" id="statusCommand" aria-label="打开命令中心">Ctrl+K</button>
+      </div>
+    </footer>
+  </div>
+
+  <div class="command-palette-overlay" id="commandPalette" hidden aria-hidden="true">
+    <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+      <h2 class="sr-only" id="commandPaletteTitle">命令中心</h2>
+      <div class="command-input-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>
+        </svg>
+        <input id="commandPaletteInput" type="text" autocomplete="off" placeholder="输入命令，例如“打开笔记”" aria-label="搜索命令">
+        <kbd>Esc</kbd>
+      </div>
+      <div class="command-results" id="commandResults" role="listbox" aria-label="可用命令"></div>
+    </section>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

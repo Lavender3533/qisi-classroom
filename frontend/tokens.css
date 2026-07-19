@@ -1,0 +1,97 @@
+/* =====================================================================
+   启思学堂 Desktop Workbench Tokens
+   Source: design-system/启思学堂/MASTER.md (UI UX Pro Max + desktop override)
+   ===================================================================== */
+:root {
+  color-scheme: light;
+
+  /* ---- Workbench geometry ---- */
+  --titlebar-height: 35px;
+  --activity-width: 48px;
+  --sidebar-width: 248px;
+  --inspector-width: 280px;
+  --statusbar-height: 24px;
+  --resizer-width: 4px;
+
+  /* ---- Desktop shell surfaces ---- */
+  --activity-bg: #1E2B2A;
+  --activity-hover: #2B3B39;
+  --activity-active: #F4F7F5;
+  --titlebar-bg: #E9EEEC;
+  --sidebar-bg: #F2F5F3;
+  --workspace-bg: #FBFCFA;
+  --panel-bg: #F6F8F6;
+  --statusbar-bg: #315B54;
+  --surface: #FFFFFF;
+  --surface-2: #EEF3F0;
+  --surface-3: #E7EDE9;
+  --item-hover: #E5ECE8;
+  --item-active: #D7E8E3;
+
+  /* ---- Brand & semantic colors ---- */
+  --primary: #0F766E;
+  --primary-hover: #0B5F59;
+  --primary-strong: #0B5F59;
+  --primary-soft: #D9EEEA;
+  --accent: #EA580C;
+  --accent-soft: #FFF0E6;
+  --success: #15803D;
+  --success-soft: #E7F5EB;
+  --warning: #B45309;
+  --warning-soft: #FFF4D8;
+  --danger: #B42318;
+  --danger-soft: #FDECEA;
+  --focus-ring: #0D9488;
+
+  /* ---- Text & borders ---- */
+  --text: #17201E;
+  --text-secondary: #3E4B47;
+  --text-muted: #5F6B67;
+  --text-on-dark: #F4F7F5;
+  --border: #D7DFDB;
+  --border-strong: #BBC8C2;
+
+  /* ---- Teaching message surfaces ---- */
+  --bubble-user-top: #D9EEEA;
+  --bubble-user-bottom: #D9EEEA;
+  --bubble-user-text: #153F3A;
+  --bubble-bot: #FFFFFF;
+  --bubble-bot-text: #17201E;
+  --sage: #387A62;
+  --sage-soft: #E7F2EC;
+
+  /* ---- Compatibility aliases ---- */
+  --bg: var(--workspace-bg);
+  --bg-grad-top: var(--workspace-bg);
+  --bg-grad-bottom: var(--workspace-bg);
+  --ribbon-bg: var(--activity-bg);
+
+  /* ---- Elevation ---- */
+  --shadow-soft: 0 1px 2px rgba(23, 32, 30, 0.08);
+  --shadow-card: 0 8px 24px rgba(23, 32, 30, 0.14);
+  --shadow-overlay: 0 18px 48px rgba(23, 32, 30, 0.24);
+
+  /* ---- Radius: desktop, not landing-page cards ---- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* ---- Typography ---- */
+  --font-head: 'Noto Sans SC', 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
+  --font-body: 'Noto Sans SC', 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
+  --font-mono: 'Cascadia Code', 'Consolas', monospace;
+  --ui-font-size: 14px;
+  --content-font-size: 14px;
+
+  /* ---- Motion ---- */
+  --t-fast: 160ms;
+  --t-mid: 220ms;
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+
+  /* ---- Layer scale ---- */
+  --z-resizer: 10;
+  --z-titlebar: 20;
+  --z-panel: 30;
+  --z-command: 50;
+}

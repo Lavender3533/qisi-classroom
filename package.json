@@ -1,0 +1,29 @@
+{
+  "name": "spiritualteachings",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node tests/run-unit-tests.mjs",
+    "test:real:assessment": "node tests/real-assessment-routing-eval.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^6"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6",
+    "@codemirror/lang-python": "^6",
+    "@codemirror/lint": "^6.9.7",
+    "@codemirror/state": "^6",
+    "@codemirror/theme-one-dark": "^6",
+    "@codemirror/view": "^6",
+    "@tauri-apps/api": "^2",
+    "codemirror": "^6"
+  }
+}

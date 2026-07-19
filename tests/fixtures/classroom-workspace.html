@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>共享课堂工作区测试</title>
+  <link rel="stylesheet" href="/frontend/tokens.css">
+  <link rel="stylesheet" href="/frontend/style.css?v=active-task-layout">
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--workspace-bg); }
+    .fixture-shell { display: flex; width: 100%; height: 100%; flex-direction: column; background: var(--workspace-bg); }
+    .fixture-shell .messages { padding-block: 18px; }
+  </style>
+</head>
+<body>
+  <main class="fixture-shell">
+    <section class="teacher-desk" aria-label="本节课教学安排">
+      <div class="teacher-desk-identity"><span class="teacher-desk-avatar" aria-hidden="true"></span><span><strong>数学老师</strong><small>概念讲解</small></span></div>
+      <div class="teacher-desk-plan"><span class="teacher-desk-label">本节目标</span><span>理解等式两边执行相同运算</span></div>
+      <div class="teacher-desk-next"><span class="teacher-desk-label">下一步</span><span>独立完成一步等价变形</span></div>
+      <div class="teacher-desk-actions"></div>
+      <ol class="lesson-rhythm" aria-label="本节课进度">
+        <li class="lesson-rhythm-step completed"><span>1</span>定位</li>
+        <li class="lesson-rhythm-step active"><span>2</span>讲解</li>
+        <li class="lesson-rhythm-step"><span>3</span>练习</li>
+        <li class="lesson-rhythm-step"><span>4</span>检查</li>
+      </ol>
+    </section>
+    <section class="classroom-board" id="classroomBoard" aria-labelledby="classroomBoardTitle">
+      <header class="classroom-board-header"><span class="classroom-board-icon" aria-hidden="true"></span><span><small>课堂板书</small><strong id="classroomBoardTitle"></strong></span></header>
+      <div class="classroom-board-items" id="classroomBoardItems"></div>
+    </section>
+    <div class="messages" id="messages">
+      <div class="row bot"><div class="mini-avatar teacher"></div><div class="msg bot"><div class="message-header"><div class="message-author">数学老师 · 概念讲解</div></div><div class="message-content">移项不是把数字搬过去，而是等式两边执行相同运算。我们先只完成一步。</div><div class="teacher-move-footer"><div><span>等你完成</span><strong>判断要消去左边的 +3 应选择哪种运算</strong></div></div></div></div>
+    </div>
+    <div class="composer-shell">
+      <section class="task-workspace" id="taskWorkspace" aria-labelledby="taskPrompt">
+        <div class="task-resize-handle" id="taskResizeHandle" role="separator" aria-label="调整代码编辑器高度" aria-orientation="horizontal" tabindex="0"></div>
+        <header class="task-workspace-header"><span class="task-workspace-icon" aria-hidden="true"></span><span><small id="taskLabel"></small><strong id="taskKnowledgePoint"></strong></span><label class="task-observer-switch" id="taskObserverControl" title="暂停或恢复老师对当前过程草稿的临时观察"><input id="taskObserverToggle" type="checkbox" checked><span class="task-observer-track" aria-hidden="true"><span></span></span><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg><span>老师看草稿</span></span></label><span class="task-expected" id="taskExpected"></span></header>
+        <p class="task-prompt" id="taskPrompt"></p>
+        <div class="quick-replies" id="quickReplies" aria-label="当前任务快速回答"><button type="button" data-answer="2x+3=11&#10;2x=11-3">先写第一步</button><button type="button" data-answer="我卡在第一步">我卡住了</button></div>
+        <div class="task-answer-editor">
+          <div class="task-answer-main">
+            <label class="sr-only" for="taskAnswer">填写当前任务答案</label>
+            <textarea id="taskAnswer" rows="4" placeholder="在这里直接作答…" aria-describedby="taskExpected taskStatus"></textarea>
+            <div class="draft-coach" id="draftCoach" role="status" aria-live="polite" hidden><span class="draft-coach-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="draft-coach-copy"><strong id="draftCoachTitle"></strong><span id="draftCoachMessage"></span></span><button id="draftCoachDismiss" type="button" aria-label="收起草稿反馈"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+          </div>
+          <div class="task-answer-actions"><button class="btn-secondary task-support-action" id="taskHint" type="button"><span>给我提示</span></button><button class="btn-secondary task-support-action" id="taskAlternate" type="button"><span>换种讲法</span></button><button class="btn-primary" id="taskSubmit" type="button"><span>提交作答</span></button></div>
+        </div>
+        <div class="task-status" id="taskStatus" role="status" aria-live="polite">草稿自动保存 · 老师观察中</div>
+      </section>
+      <div class="composer-meta"><span id="composerHint" role="status" aria-live="polite">当前任务请在上方作答；这里可自由提问或补充</span><span id="voiceFloorStatus">老师可以开口讲解</span></div>
+      <div class="composer"><textarea id="input" rows="1" placeholder="向老师提问，或补充你的思路…" aria-label="向老师自由提问或补充"></textarea><button id="send" type="button" aria-label="发送问题"></button></div>
+    </div>
+  </main>
+  <script type="module" src="./classroom-workspace-fixture.js?v=active-task-layout"></script>
+</body>
+</html>
