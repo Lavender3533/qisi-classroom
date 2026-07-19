@@ -689,6 +689,18 @@ kbd {
 
 /* ============ Teaching conversation ============ */
 .assess-phase { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.assess-phase .messages { align-items: center; }
+.assess-phase .row,
+.assess-phase .msg { min-height: 0; flex: 0 0 auto; }
+.assess-phase .teacher-move-footer { display: none; }
+.assessment-request-error {
+  display: flex; width: min(100%, 760px); flex: 0 0 auto; align-self: center; padding: 9px 12px;
+  border: 1px solid #E0C58E; border-left: 3px solid var(--warning); background: var(--warning-soft);
+}
+.assessment-request-error .response-error { width: 100%; flex-direction: row; align-items: center; gap: 8px; }
+.assessment-request-error .response-error strong { flex: 0 0 auto; }
+.assessment-request-error .response-error > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assessment-request-error .retry-response { flex: 0 0 auto; margin: 0; }
 .teacher-desk {
   display: grid;
   grid-template-columns: minmax(150px, .7fr) minmax(220px, 1.4fr) minmax(190px, 1fr) auto;

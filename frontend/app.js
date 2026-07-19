@@ -2711,24 +2711,27 @@ async function initAssessment(subjectId) {
     assessState.chatHistory.push({ role: 'assistant', content: b.textContent });
   }
 
-  async function sendChat(overrideText = '') {
+  async function sendChat(overrideText = '', { reuseStudent = false } = {}) {
     const text = String(overrideText || inputEl.value).trim();
     if (!text || sendBtn.disabled) return;
     releaseStudentVoiceTurn();
 
-    makeRow('me').textContent = text;
-    assessState.pendingQuickReplies = [];
-    assessState.chatHistory.push({ role: 'user', content: text });
-    const routed = routeAssessmentInterview({
-      completedTurns: assessState.interviewStage,
-      subjectIsAmbiguous,
-      studentResponse: text,
-    });
-    assessState.interviewStage = routed.completedTurns;
-    assessState.evidenceTags = [...new Set([
-      ...assessState.evidenceTags,
-      ...routed.evidenceTags,
-    ])];
+    let routed = { responseProfile: null, completedTurns: assessState.interviewStage, evidenceTags: [] };
+    if (!reuseStudent) {
+      makeRow('me').textContent = text;
+      assessState.pendingQuickReplies = [];
+      assessState.chatHistory.push({ role: 'user', content: text });
+      routed = routeAssessmentInterview({
+        completedTurns: assessState.interviewStage,
+        subjectIsAmbiguous,
+        studentResponse: text,
+      });
+      assessState.interviewStage = routed.completedTurns;
+      assessState.evidenceTags = [...new Set([
+        ...assessState.evidenceTags,
+        ...routed.evidenceTags,
+      ])];
+    }
     updateAssessmentObjective();
     const turnPrompt = buildAssessmentTurnPrompt({
       subjectName,
@@ -2804,8 +2807,15 @@ async function initAssessment(subjectId) {
       }
     } catch (e) {
       const reason = typeof e === 'string' ? e : (e?.message || '未知错误');
-      botEl.innerHTML = `<span class="response-error"><strong>这次没有收到老师的回复</strong><span>${escapeHtml(reason)}</span><button type="button" class="retry-response">重新发送</button></span>`;
-      botEl.querySelector('.retry-response')?.addEventListener('click', () => void sendChat(text));
+      const errorRow = botEl.closest('.row');
+      if (errorRow) {
+        errorRow.className = 'assessment-request-error';
+        errorRow.innerHTML = `<span class="response-error"><strong>老师暂时没有收到请求</strong><span>${escapeHtml(reason)}</span><button type="button" class="retry-response">重试本次回答</button></span>`;
+        errorRow.querySelector('.retry-response')?.addEventListener('click', () => {
+          errorRow.remove();
+          void sendChat(text, { reuseStudent: true });
+        });
+      }
     } finally {
       statusTimers.forEach(clearTimeout);
       sendBtn.disabled = false;

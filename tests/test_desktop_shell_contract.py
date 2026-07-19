@@ -461,6 +461,9 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("pendingQuickReplies", self.js)
         self.assertIn("extractChoiceRepliesFromText", self.js)
         self.assertIn(".inline-quick-replies", self.css)
+        self.assertIn("reuseStudent", self.js)
+        self.assertIn(".assessment-request-error", self.css)
+        self.assertIn(".assess-phase .teacher-move-footer", self.css)
         self.assertIn("previousRow?.classList.contains(roleClass)", self.js)
         self.assertIn("message-content message-segment", self.js)
 
