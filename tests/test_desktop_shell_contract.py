@@ -153,6 +153,7 @@ class DesktopShellContractTests(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(stream_content)
+        self.assertIn("payload.requestId !== requestId", stream_content)
         self.assertIn("botText += payload.text", stream_content)
         self.assertNotIn("botEl.textContent = botText", stream_content)
 
@@ -165,6 +166,13 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("parsed.unsafe", assessment.group(0))
         self.assertNotIn("botEl.textContent = botText", assessment.group(0))
         self.assertIn("老师正在组织下一个摸底任务", assessment.group(0))
+
+    def test_stream_events_are_isolated_per_request(self):
+        backend = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
+        self.assertIn('request_id: String', backend)
+        self.assertIn('"requestId": request_id', backend)
+        self.assertEqual(self.js.count("const requestId = crypto.randomUUID()"), 3)
+        self.assertGreaterEqual(self.js.count("payload.requestId !== requestId"), 3)
 
     def test_static_shell_does_not_use_emoji_as_ui_icons(self):
         titlebar = re.search(r'<header class="titlebar"[\s\S]*?</header>', self.html)
@@ -251,6 +259,22 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("eventType,", self.js)
         self.assertIn("normalizeLessonSummary", self.js)
         self.assertIn("lastLessonSummary", self.js)
+        self.assertIn("开始下一节", self.js)
+        self.assertIn("session.lastLessonSummary?.next_lesson_focus", self.js)
+        self.assertIn("skipOpeningWarmup: true", self.js)
+        self.assertIn("if (event.currentTarget.dataset.action === 'next-lesson')", self.js)
+
+    def test_java_programming_lab_compiles_runs_and_stays_task_bound(self):
+        self.assertIn("id=\"programmingLab\"", self.js)
+        self.assertIn("invoke('check_java_runtime')", self.js)
+        self.assertIn("invoke('run_java_code'", self.js)
+        self.assertIn("buildLabSubmission", self.js)
+        self.assertIn("currentTask?.key !== submission.taskKey", self.js)
+        self.assertIn("programming_lab_run", self.js)
+        rust = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
+        self.assertIn("async fn run_java_code", rust)
+        self.assertIn("kill_on_drop(true)", rust)
+        self.assertIn("JAVA_FORBIDDEN_PATTERNS", rust)
         self.assertIn("event_type === 'practice_submit'", (FRONTEND / "learning-scheduler.js").read_text(encoding="utf-8"))
         self.assertIn("buildLearnerProfile", self.js)
         self.assertIn("老师的持续观察", self.js)
@@ -345,6 +369,19 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn('class="lesson-rhythm"', self.js)
         self.assertIn('id="resumeStrip"', self.js)
         self.assertIn('id="teacherNudge"', self.js)
+        self.assertIn("reply === '稍后练习'", self.js)
+        self.assertIn("deferredRecheck: { task, deferredAt: new Date().toISOString() }", self.js)
+        self.assertIn("pendingStudentTask: session.deferredRecheck.task", self.js)
+        self.assertIn("上次保存了一道迁移练习", self.js)
+        self.assertIn("continuationKind === 'instructional_recheck'", self.js)
+        self.assertIn("kind: 'instructional_recheck_retry'", self.js)
+        self.assertIn("restore-missing-recheck", self.js)
+        self.assertIn("const restoredContinuation = cadenceRecoveryContinuation", self.js)
+        self.assertIn("suspendedStudentTask: respondingStudentTask", self.js)
+        self.assertIn("刚才的练习已暂停", self.js)
+        self.assertIn("老师正在讲解，可随时追问", self.js)
+        self.assertIn("teacherBrief.lessonStep?.phase !== 'practice'", self.js)
+        self.assertIn("const shouldDiscardChainedRecheck", self.js)
         self.assertIn("scheduleProactiveNudge(180000)", self.js)
         self.assertIn("warmclassroom.teacher.proactive", self.js)
         self.assertIn("internalCommand = false", self.js)
@@ -445,7 +482,15 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("font-family: var(--font-mono)", self.css)
         self.assertIn("cursor: ns-resize", self.css)
         self.assertIn(".messages.has-active-task .teacher-move-footer", self.css)
-        self.assertIn('.composer-shell[data-task-editor="code"] .composer', self.css)
+        self.assertIn('.composer-shell.has-active-task > .composer', self.css)
+        self.assertRegex(
+            self.css,
+            r'\.messages\.has-active-task\s*\{[^}]*max-height:\s*none;[^}]*flex:\s*0 1 auto;',
+        )
+        self.assertRegex(
+            self.css,
+            r'\.composer-shell\.has-active-task\s*\{[^}]*flex:\s*1 1 auto;',
+        )
         self.assertIn('.composer-shell.has-active-task[data-task-editor="code"]', self.css)
         self.assertIn('.task-workspace[data-editor-type="code"] .task-answer-editor', self.css)
         self.assertIn('id="taskPanelToggle"', self.js)
@@ -453,6 +498,19 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn('.task-workspace[data-editor-type="code"].is-collapsed', self.css)
         self.assertIn("const minimum = 280", self.js)
         self.assertIn("taskView.quickReplies", self.js)
+        self.assertIn("appendInlineCode(taskPromptEl, taskView.prompt)", self.js)
+        self.assertRegex(self.css, r'#taskAnswer\s*\{[^}]*min-height:\s*84px;')
+        self.assertIn('.composer-shell.has-active-task:not([data-task-editor="code"])', self.css)
+        self.assertIn('min-height: min(240px, 46vh)', self.css)
+        self.assertIn('.composer-shell.has-active-task:not([data-task-editor="code"]) .task-status', self.css)
+        self.assertIn('margin-top: auto', self.css)
+        self.assertIn('taskWorkspaceEl.scrollTop = 0', self.js)
+        self.assertIn('padding-bottom: 0', self.css)
+        self.assertIn('.task-status:empty { display: none; }', self.css)
+        self.assertIn("resolvedStatus === '等待作答' ? '' : resolvedStatus", self.js)
+        self.assertIn('.composer-shell.has-active-task:not([data-task-editor="code"]) #taskAnswer', self.css)
+        self.assertIn('.composer-shell.has-active-task:not([data-task-editor="code"]) .task-answer-actions', self.css)
+        self.assertIn('align-self: end', self.css)
         self.assertIn("data-ghost-hint", self.css)
         self.assertIn("renderTaskSubmissionArtifact", self.js)
         self.assertIn(".task-submission-artifact", self.css)
@@ -461,6 +519,22 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("pendingQuickReplies", self.js)
         self.assertIn("extractChoiceRepliesFromText", self.js)
         self.assertIn(".inline-quick-replies", self.css)
+        self.assertRegex(
+            self.css,
+            r"\.teaching-visual\s*\{[^}]*width:\s*min\(100%,\s*720px\);[^}]*align-self:\s*center;",
+        )
+        self.assertNotRegex(
+            self.css,
+            r"@media\s*\(max-width:\s*1050px\)[\s\S]*?\.teaching-visual\s*\{\s*width:\s*100%;",
+        )
+        self.assertRegex(
+            self.js,
+            r"taskHintEl\?\.addEventListener[\s\S]*?hideStudentMessage: true,[\s\S]*?internalCommand: true",
+        )
+        self.assertRegex(
+            self.js,
+            r"taskAlternateEl\?\.addEventListener[\s\S]*?hideStudentMessage: true,[\s\S]*?internalCommand: true",
+        )
         self.assertIn("reuseStudent", self.js)
         self.assertIn(".assessment-request-error", self.css)
         self.assertIn(".assess-phase .teacher-move-footer", self.css)

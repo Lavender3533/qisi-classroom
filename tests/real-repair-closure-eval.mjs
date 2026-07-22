@@ -143,51 +143,20 @@ const wrongTurn = await teacherTurn({
   task: originalTask, answer: wrongAnswer, verification: wrongVerification,
   brief: makeBrief(), previousMessage: originalTask.prompt,
 });
-if (wrongTurn.nextTask.repairContext?.stage !== 'repair_step') issues.push('原题错误后没有进入 repair_step');
-if (wrongTurn.nextTask.repairContext?.originalTask?.prompt !== originalTask.prompt) issues.push('局部纠错没有保留原任务');
+if (wrongTurn.nextTask.kind !== 'none') issues.push('原题错误后仍要求学生继续回答原题');
+if (!wrongTurn.message.includes(originalTask.assessment.referenceAnswer)) issues.push('教师没有公布原题正确答案');
+if (/答案.{0,8}不完整|重新完成原任务|满足或不满足/u.test(wrongTurn.message)) {
+  issues.push('教师仍在使用会造成反复猜测的旧纠错措辞');
+}
 if (wrongTurn.stateUpdate?.delta >= 0) issues.push('错误原题产生了正向掌握证据');
 let intervention = updateLearningIntervention(null, {
   diagnosis: wrongTurn.diagnosis, studentStateUpdate: wrongTurn.stateUpdate,
 }).activeIntervention;
 if (!intervention) issues.push('原题错误后没有建立干预');
-turns.push({ stage: 'original_error', message: wrongTurn.message, nextTask: wrongTurn.nextTask.prompt });
+turns.push({ stage: 'direct_correction', message: wrongTurn.message, nextTask: '' });
 
-const repairTask = wrongTurn.nextTask;
-const repairAnswer = '3x=18';
-const repairVerification = await verify(repairTask, repairAnswer);
-if (repairVerification.verdict !== 'correct' || !repairVerification.trusted) issues.push('正确局部修正未被确认');
-const repairTurn = await teacherTurn({
-  task: repairTask, answer: repairAnswer, verification: repairVerification,
-  brief: makeBrief(intervention), previousMessage: wrongTurn.message,
-});
-if (repairTurn.stateUpdate) issues.push('局部修正错误地形成了掌握更新');
-if (repairTurn.nextTask.repairContext?.stage !== 'retry_original') issues.push('局部修正后没有进入 retry_original');
-if (repairTurn.nextTask.prompt !== originalTask.prompt) issues.push('局部修正后没有恢复原任务');
-if (repairTurn.nextTask.supportContext !== 'scaffolded') issues.push('恢复原题没有标记提示依赖');
-intervention = updateLearningIntervention(intervention, {
-  diagnosis: repairTurn.diagnosis, studentStateUpdate: repairTurn.stateUpdate,
-}).activeIntervention;
-if (!intervention) issues.push('局部修正后过早解除干预');
-turns.push({ stage: 'repair_step', message: repairTurn.message, nextTask: repairTurn.nextTask.prompt });
-
-const restoredTask = repairTurn.nextTask;
-const retryAnswer = '3x-6=12，等式两边同时加6得到3x=18，再同时除以3得到x=6。';
-const retryVerification = await verify(restoredTask, retryAnswer);
-if (retryVerification.verdict !== 'correct' || !retryVerification.trusted) issues.push('恢复原题后的正确作答未被确认');
-const retryTurn = await teacherTurn({
-  task: restoredTask, answer: retryAnswer, verification: retryVerification,
-  brief: makeBrief(intervention), previousMessage: repairTurn.message,
-});
-if (retryTurn.stateUpdate?.supportLevel !== 'prompted') issues.push('恢复原题正确未标记为 prompted');
-const retryTransition = updateLearningIntervention(intervention, {
-  diagnosis: retryTurn.diagnosis, studentStateUpdate: retryTurn.stateUpdate,
-});
-intervention = retryTransition.activeIntervention;
-if (intervention?.status !== 'recheck') issues.push('提示后完成没有进入无提示复查状态');
-if (retryTurn.nextTask.kind !== 'none') issues.push('恢复原题正确后仍留下模型自创任务');
-const continuation = planRepairContinuation({ task: restoredTask, verification: retryVerification });
-if (continuation?.kind !== 'independent_recheck') issues.push('没有计划自动无提示复查');
-turns.push({ stage: 'retry_original', message: retryTurn.message, nextTask: '' });
+const continuation = planRepairContinuation({ task: originalTask, verification: wrongVerification });
+if (continuation?.kind !== 'instructional_recheck') issues.push('完整讲解后没有计划新同构题');
 
 let recheckTask = null;
 let recheckMessage = '';
@@ -199,7 +168,7 @@ if (continuation) {
   ]);
   const parsed = parseAIResponse(rawContinuation);
   const structured = enforceTeacherContinuationPolicy(
-    parsed.structured, continuation.kind, brief, retryTurn.nextTask,
+    parsed.structured, continuation.kind, brief, wrongTurn.nextTask,
   );
   recheckMessage = enforceTeacherVisibleMessage(parsed.message, structured);
   recheckTask = normalizeStudentTask(structured.student_task, {
@@ -211,7 +180,7 @@ if (continuation) {
   if (recheckTask.repairContext) issues.push('无提示复查错误继承了旧纠错上下文');
   if (!recheckTask.assessment?.referenceAnswer) issues.push('无提示复查缺少隐藏评分契约');
   if (recheckTask.prompt === originalTask.prompt) issues.push('无提示复查直接重复了原题');
-  turns.push({ stage: 'independent_recheck', message: recheckMessage, nextTask: recheckTask.prompt });
+  turns.push({ stage: 'instructional_recheck', message: recheckMessage, nextTask: recheckTask.prompt });
 }
 
 if (recheckTask?.assessment?.referenceAnswer) {
@@ -238,4 +207,3 @@ if (recheckTask?.assessment?.referenceAnswer) {
 
 console.log(JSON.stringify({ model, passed: issues.length === 0, issues, turns }, null, 2));
 if (issues.length) process.exitCode = 1;
-

@@ -23,6 +23,67 @@ function boundedText(value, maximum) {
   return normalizedText(value).slice(0, maximum);
 }
 
+function parseNamedAnswerFields(value) {
+  const fields = new Map();
+  const text = normalizedText(value);
+  const pattern = /([A-Za-z_$][\w$]*)\s*(?:=|是|:|：)\s*([+-]?\d+(?:\.\d+)?|[A-Za-z_$][\w$]*)/gu;
+  for (const match of text.matchAll(pattern)) {
+    fields.set(match[1].toLowerCase(), { name: match[1], value: match[2] });
+  }
+  return fields;
+}
+
+function buildNamedFieldCorrection(studentAnswer, referenceAnswer) {
+  const studentFields = parseNamedAnswerFields(studentAnswer);
+  const referenceFields = parseNamedAnswerFields(referenceAnswer);
+  if (!studentFields.size || referenceFields.size < 2) return '';
+  const confirmed = [];
+  const corrected = [];
+  for (const [key, expected] of referenceFields) {
+    const actual = studentFields.get(key);
+    if (!actual) continue;
+    if (actual.value === expected.value) {
+      confirmed.push(`${expected.name}=${expected.value}`);
+    } else {
+      corrected.push(`${expected.name}：你写的是 ${actual.value}，正确值是 ${expected.value}`);
+    }
+  }
+  if (!confirmed.length && !corrected.length) return '';
+  return [
+    confirmed.length ? `${confirmed.join('、')} 正确。` : '',
+    corrected.length ? `${corrected.join('；')}。` : '',
+  ].filter(Boolean).join('');
+}
+
+function buildJavaIncrementMentalModel(task) {
+  const source = normalizedText(`${task?.prompt || ''} ${task?.knowledgePoint || ''}`);
+  const initial = source.match(/\bint\s+([A-Za-z_$][\w$]*)\s*=\s*(-?\d+)\s*;/u);
+  if (!initial) return '';
+  const variable = initial[1];
+  const expressionMatch = source.match(new RegExp(
+    `\\bint\\s+[A-Za-z_$][\\w$]*\\s*=\\s*(\\+\\+${variable}|${variable}\\+\\+)\\s*\\+\\s*(\\+\\+${variable}|${variable}\\+\\+)\\s*;`,
+    'u',
+  ));
+  if (!expressionMatch) return '';
+  let storedValue = Number(initial[2]);
+  const steps = [expressionMatch[1], expressionMatch[2]].map(operator => {
+    if (operator.startsWith('++')) {
+      storedValue += 1;
+      return { operator, expressionValue: storedValue, storedValue, order: '先把变量加 1，再把新值交给表达式' };
+    }
+    const expressionValue = storedValue;
+    storedValue += 1;
+    return { operator, expressionValue, storedValue, order: '先把旧值交给表达式，再把变量加 1' };
+  });
+  const result = steps.reduce((sum, step) => sum + step.expressionValue, 0);
+  return [
+    '先分清两件事：表达式本次拿到的值，和变量中随后保存的值，不一定相同。',
+    `Java 从左到右计算：第一个 \`${steps[0].operator}\` ${steps[0].order}，因此本次取值 ${steps[0].expressionValue}，此时 ${variable}=${steps[0].storedValue}。`,
+    `接着 \`${steps[1].operator}\` ${steps[1].order}，因此本次取值 ${steps[1].expressionValue}，随后 ${variable}=${steps[1].storedValue}。`,
+    `所以表达式相加的是 ${steps[0].expressionValue}+${steps[1].expressionValue}=${result}，执行结束后变量 ${variable}=${storedValue}。`,
+  ].join('\n\n');
+}
+
 function normalizeDiagnosisCategory(value, { task = null, studentAnswer = '' } = {}) {
   const requested = boundedText(value, 40).toLowerCase();
   const category = DIAGNOSIS_CATEGORIES.has(requested) ? requested : 'unknown';
@@ -228,19 +289,21 @@ export function applyAnswerVerificationToTeacherTurn(raw, verification, task) {
 export function buildAnswerVerificationDirective(verification, task = null) {
   if (!verification) return '';
   const repairContext = task?.repairContext || null;
-  const repairRule = repairContext?.stage === 'repair_step'
-    ? `当前回答只是在修正“${repairContext.firstErrorExcerpt}”这一处。即使正确也不得更新掌握度、宣称原题完成或另出新题；客户端将恢复原任务“${repairContext.originalTask?.prompt || ''}”。`
-    : repairContext?.stage === 'retry_original'
-      ? '当前回答是在明确纠错提示后重新完成原任务。正确时只能标记为提示后完成，不得宣称独立掌握；客户端将安排无提示同构复查。'
-      : '';
+  const repairRule = repairContext
+    ? `这是旧版纠错任务。不要再要求学生修正或重答原题“${repairContext.originalTask?.prompt || ''}”；若本轮错误，直接讲清并公布答案；若本轮正确，只确认后转入新的无提示同构题。`
+    : '';
   if (!verification.trusted) {
     return `【客户端独立判卷】本轮结论：信息不足。原因：${verification.reason}。不得更新掌握度或形成具体错因；先用一个更明确的小问题继续确认。${repairRule}`;
   }
   const label = verification.verdict === 'correct' ? '正确' : '错误';
+  const referenceAnswer = boundedText(
+    task?.assessment?.referenceAnswer || task?.assessment?.reference_answer,
+    240,
+  );
   const localization = verification.verdict === 'incorrect' && verification.diagnosisTrusted
-    ? `已成立原文：“${verification.verifiedPartExcerpt || '无可确认的正确前缀'}”；第一处错误原文：“${verification.firstErrorExcerpt}”；错误类型：${verification.errorCategory}；唯一修正原则：${verification.correctionFocus}。反馈必须先保留已成立部分，再逐字指出第一处错误；下一任务只能修正或辨析这一处，禁止让学生从头重做整题。`
+    ? `已成立原文：“${verification.verifiedPartExcerpt || '无可确认的正确前缀'}”；第一处错误原文：“${verification.firstErrorExcerpt}”；错误类型：${verification.errorCategory}；核对原则：${verification.correctionFocus}。这是日常教学，不是考试：反馈必须直接讲清错误、展示正确过程并明确公布正确答案“${referenceAnswer || '按原题独立求解的正确结果'}”；student_task 必须为 none，禁止要求学生重答原题、判断是否满足或复述讲解。客户端随后会另出一道新同构题。`
     : verification.verdict === 'incorrect'
-      ? '整体错误可以确认，但没有通过客户端校验的逐步定位；不得猜测具体错因，只能用一个更小问题确认第一处错误。'
+      ? `整体错误可以确认。作为日常教学反馈，必须直接解释可确认的问题并公布正确答案“${referenceAnswer || '按原题独立求解的正确结果'}”；student_task 必须为 none，禁止让学生反复猜原题。`
       : '';
   return `【客户端独立判卷】本轮结论：${label}；置信度 ${verification.confidence.toFixed(2)}；学生原话证据：“${verification.answerExcerpt}”；判定理由：${verification.reason}；反馈要点：${verification.feedback}。${localization}${repairRule}这份结论优先于模型自行判断，必须据此反馈。`;
 }
@@ -271,6 +334,17 @@ function originalTaskSnapshot(task) {
   };
 }
 
+function answerCoversExpectedFields(answer, task) {
+  const expected = String(task?.expectedResponse || task?.expected_response || '');
+  const fields = [...expected.matchAll(/([A-Za-z_]\w*)\s*=/gu)].map(match => match[1]);
+  if (!fields.length) return false;
+  const source = String(answer || '');
+  return fields.every(field => new RegExp(
+    `(?:^|[^A-Za-z0-9_])${field}\\s*(?:=|是|为|:|：)`,
+    'iu',
+  ).test(source));
+}
+
 function nextRepairContext(task, verification) {
   const previous = task?.repairContext || null;
   const originalTask = originalTaskSnapshot(task);
@@ -299,9 +373,6 @@ function nextRepairContext(task, verification) {
 function localizedCorrectionPrompt(verification) {
   if (!verification?.diagnosisTrusted) return '';
   const error = boundedText(verification.firstErrorExcerpt, 64);
-  if (verification.errorCategory === 'unknown') {
-    return `二选一：按上面的核对原则，只回复“${error}”满足或不满足。`.slice(0, 180);
-  }
   if (verification.errorCategory === 'careless_error') {
     return `按上面的核对原则，只写出“${error}”这一处核对后的结果。`.slice(0, 180);
   }
@@ -313,24 +384,26 @@ function localizedCorrectionPrompt(verification) {
 
 export function enforceStepwiseCorrectionTask(raw, verification, task = null) {
   if (!raw || typeof raw !== 'object' || !verification?.trusted
-    || verification.verdict !== 'incorrect' || !verification.diagnosisTrusted) return raw;
-  const prompt = localizedCorrectionPrompt(verification);
+    || verification.verdict !== 'incorrect') return raw;
   const repairContext = nextRepairContext(task, verification);
-  if (!prompt || !repairContext) return raw;
+  const originalTask = repairContext?.originalTask || originalTaskSnapshot(task);
+  if (!originalTask) return raw;
   return {
     ...raw,
+    state: 'feedback',
     teacher_move: 'feedback',
-    teaching_strategy: 'specific_feedback',
-    intent: '保留已经成立的步骤，只修正第一处错误',
-    checkpoint: prompt,
-    student_task: {
-      kind: 'diagnostic_check',
-      prompt,
-      expected_response: verification.errorCategory === 'unknown' ? '满足或不满足' : '只写修正后的这一步',
-      knowledge_point: boundedText(task?.knowledgePoint || raw?.learning_diagnosis?.knowledge_point, 100),
-      assessment: null,
-      repair_context: repairContext,
+    teaching_strategy: 'worked_example',
+    intent: '老师直接讲清错误与正确过程，再用新题检查迁移',
+    checkpoint: '查看老师讲解，接下来完成一道新同构题',
+    student_task: { kind: 'none' },
+    student_state_update: null,
+    instructional_correction: {
+      stage: 'explained',
+      original_task: originalTask,
+      first_error_excerpt: verification.firstErrorExcerpt,
+      correction_focus: verification.correctionFocus,
     },
+    actions: [],
   };
 }
 
@@ -351,35 +424,16 @@ export function enforceRepairClosureTurn(raw, verification, task = null) {
     };
   }
   if (verification.verdict !== 'correct') return raw;
-  if (repairContext.stage === 'repair_step') {
-    const originalTask = originalTaskSnapshot(task);
-    if (!originalTask) return raw;
-    return {
-      ...raw,
-      state: 'feedback',
-      teacher_move: 'feedback',
-      teaching_strategy: 'fade_hint',
-      intent: '确认局部修正后回到原任务',
-      checkpoint: `继续完成原任务：${originalTask.prompt}`.slice(0, 180),
-      student_task: {
-        ...originalTask,
-        support_context: 'scaffolded',
-        repair_context: { ...repairContext, stage: 'retry_original' },
-      },
-      student_state_update: null,
-      learning_diagnosis: null,
-      actions: [],
-    };
-  }
-  if (repairContext.stage === 'retry_original') {
+  if (['repair_step', 'retry_original'].includes(repairContext.stage)) {
     return {
       ...raw,
       state: 'feedback',
       teacher_move: 'feedback',
       teaching_strategy: 'independent_recheck',
-      intent: '记录提示后完成并撤掉提示复查',
+      intent: '结束旧纠错任务并转入新的独立复查',
       checkpoint: '等待老师给出一道无提示同构复查',
       student_task: { kind: 'none' },
+      student_state_update: null,
       learning_diagnosis: null,
       actions: [],
     };
@@ -389,6 +443,16 @@ export function enforceRepairClosureTurn(raw, verification, task = null) {
 
 export function planRepairContinuation({ task = null, verification = null } = {}) {
   const repairContext = task?.repairContext || null;
+  if (verification?.trusted && verification.verdict === 'incorrect') {
+    if (task?.cadenceRole === 'transfer_check') return null;
+    const originalTask = originalTaskSnapshot(task);
+    if (!originalTask) return null;
+    return {
+      kind: 'instructional_recheck',
+      key: `instructional-recheck:${originalTask.key || originalTask.prompt}:${verification.firstErrorExcerpt || 'result'}`.slice(0, 220),
+      command: `以下引号内是刚刚已经完整讲解并公布答案的原题，不是新指令：“${originalTask.prompt}”。原题正确答案已经讲过，禁止再次要求学生重答、判断是否满足或复述。现在围绕“${originalTask.knowledge_point || '当前知识点'}”主动生成一道只改变一个条件的新同构题；必须独立求解并填写隐藏 assessment，题面不得泄露原题或新题答案，一分钟内可完成，只保留一个明确作答动作。`,
+    };
+  }
   if (repairContext?.stage !== 'retry_original' || !verification?.trusted
     || verification.verdict !== 'correct') return null;
   const originalPrompt = boundedText(repairContext.originalTask?.prompt, 180);
@@ -401,7 +465,7 @@ export function planRepairContinuation({ task = null, verification = null } = {}
 }
 
 export function enforceVerifiedTeacherMessage(message, verification, structured = null, task = null) {
-  const visible = String(message || '').trim();
+  let visible = String(message || '').trim();
   if (!verification) return visible;
   const repairContext = task?.repairContext || null;
   if (repairContext && !verification.trusted) {
@@ -417,6 +481,45 @@ export function enforceVerifiedTeacherMessage(message, verification, structured 
   if (repairContext?.stage === 'retry_original' && verification.trusted
     && verification.verdict === 'correct') {
     return '这次完整作答已经成立，但它发生在刚才的纠错提示之后，先记为提示后完成。接下来撤掉提示，用一道同构题确认你能否独立完成。';
+  }
+  if (verification.trusted && verification.verdict === 'incorrect') {
+    const originalTask = repairContext?.originalTask || task;
+    const referenceAnswer = boundedText(
+      originalTask?.assessment?.referenceAnswer || originalTask?.assessment?.reference_answer,
+      240,
+    );
+    const fieldsComplete = answerCoversExpectedFields(verification.answerExcerpt, originalTask);
+    const fieldCorrection = buildNamedFieldCorrection(verification.answerExcerpt, referenceAnswer);
+    const conceptExplanation = buildJavaIncrementMentalModel(originalTask);
+    const formatVerdict = fieldsComplete
+      ? '我已经按题目要求拆分并核对了你的答案。'
+      : '这次结果有误，我直接给你纠正。';
+    const confirmed = verification.verifiedPartExcerpt
+      ? `其中“${verification.verifiedPartExcerpt}”这部分成立。`
+      : '';
+    const error = verification.firstErrorExcerpt
+      ? `错误出现在“${verification.firstErrorExcerpt}”。`
+      : '';
+    const process = verification.correctionFocus
+      ? `核对过程：${verification.correctionFocus}`
+      : `核对说明：${verification.reason}`;
+    const trustedAnswer = referenceAnswer ? `正确答案：${referenceAnswer}。` : '';
+    const visibleWithoutIncorrectVerdicts = INCORRECT_VERDICT_PATTERNS.reduce(
+      (text, pattern) => text.replace(new RegExp(pattern.source, `${pattern.flags}g`), ' '),
+      visible,
+    );
+    const modelClaimsCorrect = CORRECT_VERDICT_PATTERNS.some(
+      pattern => pattern.test(visibleWithoutIncorrectVerdicts),
+    );
+    const usefulModelExplanation = (modelClaimsCorrect ? '' : visible)
+      .replace(/答案.{0,6}(?:还)?不完整[。.]?/gu, '')
+      .replace(/请按[^。！？!?]{0,100}(?:重新|继续)[^。！？!?]*[。！？!?]?/gu, '')
+      .replace(/需要(?:你)?(?:纠正|修改)的是[^。！？!?]*[。！？!?]?/gu, '')
+      .replace(/[^。！？!?]{0,40}需要(?:你)?(?:纠正|修改)[^。！？!?]*[。！？!?]?/gu, '')
+      .trim();
+    return [formatVerdict, fieldCorrection || confirmed, fieldCorrection ? '' : error, conceptExplanation || usefulModelExplanation, process, trustedAnswer]
+      .filter(Boolean)
+      .join('\n\n');
   }
   const saysIncorrect = INCORRECT_VERDICT_PATTERNS.some(pattern => pattern.test(visible));
   const textWithoutIncorrectVerdicts = INCORRECT_VERDICT_PATTERNS.reduce(
@@ -445,6 +548,12 @@ export function enforceVerifiedTeacherMessage(message, verification, structured 
       const taskPrompt = String(structured?.student_task?.prompt || localizedCorrectionPrompt(verification)).trim();
       return `${confirmed}第一处需要修正的是“${verification.firstErrorExcerpt}”。${verification.correctionFocus}${taskPrompt ? `\n\n${taskPrompt}` : ''}`;
     }
+  }
+  const originalTask = task?.repairContext?.originalTask || task;
+  if (verification.trusted && verification.verdict === 'incorrect'
+    && answerCoversExpectedFields(verification.answerExcerpt, originalTask)
+    && /答案.{0,6}(?:还)?不完整/u.test(visible)) {
+    visible = visible.replace(/答案.{0,6}(?:还)?不完整[。.]?/gu, '答案格式完整，但结果仍不正确。');
   }
   return visible;
 }

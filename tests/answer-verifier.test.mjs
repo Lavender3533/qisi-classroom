@@ -116,14 +116,21 @@ test('incorrect multi-step work localizes the first error and preserves the vali
     student_task: { kind: 'practice', prompt: '重新解出完整方程' },
     learning_diagnosis: guarded.learning_diagnosis,
   }, verification, task);
-  assert.equal(localized.student_task.kind, 'diagnostic_check');
-  assert.match(localized.student_task.prompt, /x=6/);
-  assert.doesNotMatch(localized.student_task.prompt, /从头|整题|最终答案/);
+  assert.equal(localized.student_task.kind, 'none');
+  assert.equal(localized.instructional_correction.stage, 'explained');
+  assert.equal(localized.student_state_update, null);
+  const continuation = planRepairContinuation({ task, verification });
+  assert.equal(continuation.kind, 'instructional_recheck');
+  assert.match(continuation.command, /新同构题/);
 
-  const visible = enforceVerifiedTeacherMessage('答案错误，请重新计算。', verification, localized);
+  const transferTask = { ...task, cadenceRole: 'transfer_check' };
+  assert.equal(planRepairContinuation({ task: transferTask, verification }), null);
+
+  const visible = enforceVerifiedTeacherMessage('答案错误，我来讲清最后一步。', verification, localized, task);
   assert.match(visible, /得到2x=8/);
   assert.match(visible, /x=6/);
   assert.match(visible, /两边必须同时除以 2/);
+  assert.match(visible, /正确答案.*x=4/);
 });
 
 test('invalid or absent localization never becomes a specific diagnosis', () => {
@@ -159,7 +166,7 @@ test('invalid or absent localization never becomes a specific diagnosis', () => 
   assert.doesNotMatch(finalOnly.correctionFocus, /移到|另一边/);
 });
 
-test('guided repair restores the original task and requires an independent recheck', () => {
+test('classroom correction explains the answer and immediately plans a new recheck', () => {
   const originalAnswer = '两边同时减3得到2x=8，然后写成x=6。';
   const wrong = normalizeAnswerVerification({
     verdict: 'incorrect', confidence: 0.96, answer_excerpt: 'x=6',
@@ -170,82 +177,96 @@ test('guided repair restores the original task and requires an independent reche
   const rawRepair = enforceStepwiseCorrectionTask({
     teacher_move: 'feedback', learning_diagnosis: learningDiagnosisFromVerification(wrong, task),
   }, wrong, task);
-  const repairTask = normalizeStudentTask(rawRepair.student_task, {
-    teacherMove: rawRepair.teacher_move, checkpoint: rawRepair.checkpoint,
-  });
-  assert.equal(repairTask.kind, 'diagnostic_check');
-  assert.equal(repairTask.repairContext.stage, 'repair_step');
-  assert.equal(repairTask.repairContext.originalTask.prompt, task.prompt.normalize('NFKC'));
-  assert.equal(
-    repairTask.repairContext.originalTask.assessment.referenceAnswer,
-    task.assessment.referenceAnswer.normalize('NFKC'),
-  );
-  assert.equal(shouldVerifyStudentAnswer(repairTask, 'attempt'), true);
-
-  const repaired = normalizeAnswerVerification({
-    verdict: 'correct', confidence: 0.94, answer_excerpt: 'x=4',
-    verified_part_excerpt: '', first_error_excerpt: '', error_category: 'unknown', correction_focus: '',
-    reason: '由 2x=8 两边同时除以2可得 x=4。', feedback: '这一处已经修正。',
-  }, { studentAnswer: 'x=4', task: repairTask });
-  const guardedRepair = applyAnswerVerificationToTeacherTurn({
-    student_state_update: { mastery_delta: 0.15 },
-    student_task: { kind: 'practice', prompt: '做一道新题' },
-  }, repaired, repairTask);
-  assert.equal(guardedRepair.student_state_update, null);
-  const restoredRaw = enforceRepairClosureTurn(guardedRepair, repaired, repairTask);
-  const restoredTask = normalizeStudentTask(restoredRaw.student_task, {
-    teacherMove: restoredRaw.teacher_move, checkpoint: restoredRaw.checkpoint,
-  });
-  assert.equal(restoredTask.kind, task.kind);
-  assert.equal(restoredTask.prompt, task.prompt.normalize('NFKC'));
-  assert.equal(restoredTask.supportContext, 'scaffolded');
-  assert.equal(restoredTask.repairContext.stage, 'retry_original');
-  assert.equal(restoredTask.assessment.referenceAnswer, task.assessment.referenceAnswer.normalize('NFKC'));
-  assert.match(
-    enforceVerifiedTeacherMessage('再做一道新题。', repaired, restoredRaw, repairTask),
-    /回到原任务/,
-  );
-
-  const retryAnswer = '两边同时减3得到2x=8，再同时除以2得到x=4。';
-  const retryCorrect = normalizeAnswerVerification({
-    verdict: 'correct', confidence: 0.97, answer_excerpt: 'x=4',
-    verified_part_excerpt: '', first_error_excerpt: '', error_category: 'unknown', correction_focus: '',
-    reason: '每一步都保持等式成立。', feedback: '完整作答成立。',
-  }, { studentAnswer: retryAnswer, task: restoredTask });
-  const retryGuarded = applyAnswerVerificationToTeacherTurn({
-    student_task: { kind: 'knowledge_check', prompt: '直接进入下一章' },
-  }, retryCorrect, restoredTask);
-  assert.equal(retryGuarded.student_state_update.support_level, 'prompted');
-  const closed = enforceRepairClosureTurn(retryGuarded, retryCorrect, restoredTask);
-  assert.equal(closed.student_task.kind, 'none');
-  const continuation = planRepairContinuation({ task: restoredTask, verification: retryCorrect });
-  assert.equal(continuation.kind, 'independent_recheck');
-  assert.match(continuation.command, /不带提示|同构题/);
+  assert.equal(rawRepair.student_task.kind, 'none');
+  assert.equal(rawRepair.instructional_correction.stage, 'explained');
+  const visible = enforceVerifiedTeacherMessage('最后一步不对。', wrong, rawRepair, task);
+  assert.match(visible, /正确答案.*x=4/);
+  const continuation = planRepairContinuation({ task, verification: wrong });
+  assert.equal(continuation.kind, 'instructional_recheck');
+  assert.match(continuation.command, /禁止再次要求学生重答/);
 });
 
-test('failed repair keeps the original task and increments the same repair context', () => {
+test('legacy repair tasks close instead of returning to the original problem', () => {
   const wrong = normalizeAnswerVerification({
     verdict: 'incorrect', confidence: 0.95, answer_excerpt: 'x=6',
     verified_part_excerpt: '2x=8', first_error_excerpt: 'x=6', error_category: 'careless_error',
     correction_focus: '两边同时除以 2。', reason: '最后一步不成立。', feedback: '核对最后一步。',
   }, { studentAnswer: '2x=8，所以x=6', task });
-  const first = normalizeStudentTask(
-    enforceStepwiseCorrectionTask({}, wrong, task).student_task,
-    { teacherMove: 'feedback', checkpoint: '修正第一处错误' },
+  const legacyTask = normalizeStudentTask({
+    kind: 'diagnostic_check', prompt: '只改写 x=6', expected_response: '一个等式',
+    repair_context: {
+      id: 'legacy-repair', stage: 'repair_step', attempts: 1,
+      first_error_excerpt: 'x=6', original_error_excerpt: 'x=6',
+      correction_focus: '两边同时除以 2。',
+      original_task: task,
+    },
+  }, { teacherMove: 'feedback' });
+  const corrected = normalizeAnswerVerification({
+    verdict: 'correct', confidence: 0.94, answer_excerpt: 'x=4', reason: '局部结果正确。', feedback: '已修正。',
+  }, { studentAnswer: 'x=4', task: legacyTask });
+  const closed = enforceRepairClosureTurn({}, corrected, legacyTask);
+  assert.equal(closed.student_task.kind, 'none');
+  assert.equal(closed.student_state_update, null);
+});
+
+test('wrong answers are taught directly without completeness labels or original-task retries', () => {
+  const formatTask = normalizeStudentTask({
+    kind: 'knowledge_check',
+    prompt: '计算 int i=3; int r=++i + i++; 执行后 i 和 r 的值。',
+    expected_response: '一行：i=数字，r=数字',
+    knowledge_point: '前置与后置自增',
+    assessment: { reference_answer: 'i=5,r=8', criteria: ['同时给出 i 和 r'], grading_mode: 'equivalent' },
+  });
+  const incomplete = normalizeAnswerVerification({
+    verdict: 'incorrect', confidence: 0.96, answer_excerpt: '7',
+    verified_part_excerpt: '', first_error_excerpt: '7', error_category: 'unknown',
+    correction_focus: '答案必须同时给出 i 和 r。', reason: '只给出一个数字。', feedback: '补全两个变量。',
+  }, { studentAnswer: '7', task: formatTask });
+  const repaired = enforceStepwiseCorrectionTask({ teacher_move: 'feedback' }, incomplete, formatTask);
+  assert.equal(repaired.student_task.kind, 'none');
+  const firstVisible = enforceVerifiedTeacherMessage('请重新完成原任务。', incomplete, repaired, formatTask);
+  assert.doesNotMatch(firstVisible, /答案不完整|答案还不完整/);
+  assert.match(firstVisible, /正确答案.*i=5,r=8/);
+
+  const completeButWrong = normalizeAnswerVerification({
+    verdict: 'incorrect', confidence: 0.96, answer_excerpt: 'i 是4 r是7',
+    verified_part_excerpt: '', first_error_excerpt: 'i 是4 r是7', error_category: 'unknown',
+    correction_focus: '重新跟踪前置与后置自增后的两个变量值。',
+    reason: '两个字段都已给出，但数值不正确。', feedback: '格式完整，请重新核对结果。',
+  }, { studentAnswer: 'i 是4 r是7', task: formatTask });
+  const retry = enforceStepwiseCorrectionTask({ teacher_move: 'feedback' }, completeButWrong, formatTask);
+  assert.equal(retry.student_task.kind, 'none');
+  const visible = enforceVerifiedTeacherMessage(
+    '第一处需要修正的是“i 是4 r是7”。答案还不完整。',
+    completeButWrong,
+    retry,
+    formatTask,
   );
-  const stillWrong = normalizeAnswerVerification({
-    verdict: 'incorrect', confidence: 0.91, answer_excerpt: 'x=8',
-    verified_part_excerpt: '', first_error_excerpt: 'x=8', error_category: 'careless_error',
-    correction_focus: '仍需将 8 同时除以 2。', reason: '修正结果仍不成立。', feedback: '继续核对除法。',
-  }, { studentAnswer: 'x=8', task: first });
-  const second = normalizeStudentTask(
-    enforceStepwiseCorrectionTask({}, stillWrong, first).student_task,
-    { teacherMove: 'feedback', checkpoint: '继续修正' },
+  assert.match(visible, /按题目要求拆分并核对/);
+  assert.doesNotMatch(visible, /答案还不完整/);
+  assert.doesNotMatch(visible, /需要(?:你)?纠正/);
+  assert.match(visible, /正确答案.*i=5,r=8/);
+  assert.match(visible, /表达式本次拿到的值/);
+  assert.match(visible, /先把变量加 1，再把新值交给表达式/);
+  assert.match(visible, /先把旧值交给表达式，再把变量加 1/);
+  assert.match(visible, /表达式相加的是 4\+4=8/);
+
+  const partiallyCorrect = normalizeAnswerVerification({
+    verdict: 'incorrect', confidence: 0.96, answer_excerpt: 'i 是4 r是6',
+    verified_part_excerpt: '', first_error_excerpt: 'r是6', error_category: 'execution_error',
+    correction_focus: '后置自增先取旧值参与表达式，再把 i 增加 1。',
+    reason: 'i 正确，r 的数值错误。', feedback: '逐项核对变量。',
+  }, { studentAnswer: 'i 是4 r是6', task: {
+    ...formatTask,
+    assessment: { ...formatTask.assessment, referenceAnswer: 'i=4,r=8' },
+  } });
+  const partialVisible = enforceVerifiedTeacherMessage(
+    '需要你纠正的是 r。', partiallyCorrect, retry,
+    { ...formatTask, assessment: { ...formatTask.assessment, referenceAnswer: 'i=4,r=8' } },
   );
-  assert.equal(second.repairContext.id, first.repairContext.id);
-  assert.equal(second.repairContext.originalTask.prompt, task.prompt.normalize('NFKC'));
-  assert.equal(second.repairContext.attempts, first.repairContext.attempts + 1);
-  assert.equal(second.repairContext.firstErrorExcerpt, 'x=8');
+  assert.match(partialVisible, /i=4 正确/);
+  assert.match(partialVisible, /r：你写的是 6，正确值是 8/);
+  assert.doesNotMatch(partialVisible, /需要你纠正|需要纠正的是/);
 });
 
 test('unavailable or insufficient verification fails closed without blocking feedback', () => {
@@ -272,10 +293,9 @@ test('visible feedback cannot contradict the trusted verifier verdict', () => {
     verdict: 'incorrect', confidence: 0.9, answer_excerpt: '7',
     reason: '1+2+3 的和不是 7。', feedback: '重新检查 2+3 这一步。',
   }, { studentAnswer: '7' });
-  assert.equal(
-    enforceVerifiedTeacherMessage('你的答案正确，可以继续。', incorrect),
-    '这次还不能判为正确。重新检查 2+3 这一步。',
-  );
+  const correctedIncorrect = enforceVerifiedTeacherMessage('你的答案正确，可以继续。', incorrect);
+  assert.match(correctedIncorrect, /结果有误，我直接给你纠正/);
+  assert.doesNotMatch(correctedIncorrect, /答案正确|可以继续/);
   for (const contradictory of ['这个结果不对，再算一次。', '你的回答有误。', '你答错了。']) {
     assert.equal(
       enforceVerifiedTeacherMessage(contradictory, correct),
@@ -283,13 +303,12 @@ test('visible feedback cannot contradict the trusted verifier verdict', () => {
     );
   }
   for (const contradictory of ['这个结果没错。', '你的回答无误。', '你算对了。']) {
-    assert.equal(
-      enforceVerifiedTeacherMessage(contradictory, incorrect),
-      '这次还不能判为正确。重新检查 2+3 这一步。',
-    );
+    const corrected = enforceVerifiedTeacherMessage(contradictory, incorrect);
+    assert.match(corrected, /结果有误，我直接给你纠正/);
+    assert.doesNotMatch(corrected, /没错|无误|算对/);
   }
-  assert.equal(
-    enforceVerifiedTeacherMessage('你的答案不正确，请检查。', incorrect),
-    '你的答案不正确，请检查。',
+  assert.match(
+    enforceVerifiedTeacherMessage('这个结果需要纠正。', incorrect),
+    /结果有误，我直接给你纠正/,
   );
 });

@@ -7,6 +7,7 @@ import { Compartment, EditorState } from '@codemirror/state';
 import { linter, lintGutter } from '@codemirror/lint';
 import { invoke } from '@tauri-apps/api/core';
 import { python } from '@codemirror/lang-python';
+import { java } from '@codemirror/lang-java';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { autocompletion, closeBrackets } from '@codemirror/autocomplete';
 import { defaultKeymap, indentWithTab, history, historyKeymap } from '@codemirror/commands';
@@ -15,7 +16,8 @@ import { lineNumbers, highlightActiveLineGutter, highlightActiveLine, rectangula
 
 /** 创建课堂代码任务使用的通用编辑器。 */
 export function createTaskCodeEditor(parent, options = {}) {
-  const { initialCode = '', placeholder = '在这里编写代码…', onChange = () => {}, onSubmit = () => {} } = options;
+  const { initialCode = '', language = '', placeholder = '在这里编写代码…', onChange = () => {}, onSubmit = () => {} } = options;
+  const languageExtension = language === 'java' ? java() : language === 'python' ? python() : [];
   const theme = EditorView.theme({
     '&': { height: '100%', backgroundColor: '#17201E', color: '#E7F2EE', fontSize: '13px' },
     '.cm-scroller': { fontFamily: "'Cascadia Code', 'Consolas', monospace", lineHeight: '1.65' },
@@ -29,6 +31,7 @@ export function createTaskCodeEditor(parent, options = {}) {
     extensions: [
       lineNumbers(), highlightActiveLineGutter(), history(), indentOnInput(), bracketMatching(),
       closeBrackets(), highlightActiveLine(), oneDark, theme, cmPlaceholder(placeholder),
+      languageExtension,
       keymap.of([{ key: 'Ctrl-Enter', run: () => { onSubmit(); return true; } }, ...defaultKeymap, ...historyKeymap, indentWithTab]),
       EditorView.updateListener.of(update => {
         if (update.docChanged) onChange(update.state.doc.toString());

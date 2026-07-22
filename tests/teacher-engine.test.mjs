@@ -132,7 +132,7 @@ test('invalid lesson plan falls back to a complete four-step short lesson', () =
 test('lesson progress requires new task-bound evidence at each mastery gate', () => {
   const plan = createFallbackLessonPlan({ focus: '循环' });
   const afterExplain = updateLessonProgress(plan, { currentStep: 0 }, { teacherMove: 'model', teachingEvidence: true });
-  assert.equal(afterExplain.currentStep, 0);
+  assert.equal(afterExplain.currentStep, 1);
   assert.equal(afterExplain.instructionDelivered, true);
   const understandingContext = {
     source: 'chat', taskKey: 'understanding-1', taskKind: 'knowledge_check',
@@ -143,13 +143,13 @@ test('lesson progress requires new task-bound evidence at each mastery gate', ()
     studentStateUpdate: { knowledge_point: '循环', mastery_delta: 0.08, confidence: 0.9, evidence: '学生独立指出每轮把当前值加到总和', support_level: 'independent' },
     evidenceContext: understandingContext,
   });
-  assert.equal(afterCheck.currentStep, 1);
+  assert.equal(afterCheck.currentStep, 2);
   const repeated = updateLessonProgress(plan, afterCheck, {
     teacherMove: 'feedback',
     studentStateUpdate: { knowledge_point: '循环', mastery_delta: 0.08, confidence: 0.9, evidence: '学生独立指出每轮把当前值加到总和', support_level: 'independent' },
     evidenceContext: understandingContext,
   });
-  assert.equal(repeated.currentStep, 1);
+  assert.equal(repeated.currentStep, 2);
   const prompted = updateLessonProgress(plan, afterCheck, {
     teacherMove: 'feedback',
     studentStateUpdate: { knowledge_point: '循环', mastery_delta: 0.08, confidence: 0.9, evidence: '学生根据提示修正循环并得到正确结果', support_level: 'prompted' },
@@ -158,7 +158,7 @@ test('lesson progress requires new task-bound evidence at each mastery gate', ()
       taskKnowledgePoint: '循环', answer: 'sum += i', attempt: 2,
     },
   });
-  assert.equal(prompted.currentStep, 1);
+  assert.equal(prompted.currentStep, 2);
   assert.equal(buildLessonMasterySnapshot(plan, prompted).current.status, 'needs_recheck');
   const unsupported = updateLessonProgress(plan, afterCheck, {
     teacherMove: 'feedback',
@@ -168,7 +168,7 @@ test('lesson progress requires new task-bound evidence at each mastery gate', ()
       taskKnowledgePoint: '循环', answer: 'arr[0]', attempt: 1,
     },
   });
-  assert.equal(unsupported.currentStep, 1);
+  assert.equal(unsupported.currentStep, 2);
   const afterPractice = updateLessonProgress(plan, prompted, {
     teacherMove: 'feedback',
     studentStateUpdate: { knowledge_point: '循环', mastery_delta: 0.08, confidence: 0.9, evidence: '学生无提示独立写出循环并得到正确结果', support_level: 'independent' },
@@ -177,19 +177,10 @@ test('lesson progress requires new task-bound evidence at each mastery gate', ()
       taskKnowledgePoint: '循环', answer: 'sum += i', attempt: 1,
     },
   });
-  assert.equal(afterPractice.currentStep, 2);
+  assert.equal(afterPractice.currentStep, 3);
   assert.equal(buildLessonMasterySnapshot(plan, afterPractice).criteria[0].status, 'verified');
-  assert.equal(buildLessonMasterySnapshot(plan, afterPractice).criteria[1].status, 'pending');
-  const afterTransfer = updateLessonProgress(plan, afterPractice, {
-    teacherMove: 'feedback',
-    studentStateUpdate: { knowledge_point: '循环', mastery_delta: 0.08, confidence: 0.9, evidence: '学生独立完成改变起点后的变式并得到正确结果', support_level: 'independent' },
-    evidenceContext: {
-      source: 'quiz', taskKey: 'transfer-independent', taskKind: 'knowledge_check',
-      taskKnowledgePoint: '循环', answer: '14', attempt: 1,
-    },
-  });
-  assert.equal(afterTransfer.currentStep, 3);
-  assert.equal(buildLessonMasterySnapshot(plan, afterTransfer).criteria[1].status, 'verified');
+  assert.equal(buildLessonMasterySnapshot(plan, afterPractice).criteria[1].status, 'verified');
+  const afterTransfer = afterPractice;
 
   const firstDifficulty = updateLessonProgress(plan, { currentStep: 2 }, {
     teacherMove: 'feedback',
@@ -531,6 +522,17 @@ test('teacher continuation distinguishes prompted correction, step advance, and 
   assert.match(advance.command, /主动开始当前教案的新步骤/);
   assert.match(advance.key, /advance_lesson:循环边界短课:2/);
 
+  const chatAdvance = planTeacherContinuation({
+    lessonPlan: plan,
+    previousProgress: { currentStep: 1, attempts: 0, status: 'active' },
+    nextProgress: { currentStep: 2, attempts: 0, status: 'active' },
+    source: 'chat',
+    evidence: {
+      correct: true, supportLevel: 'independent', knowledgePoint: '循环边界', answer: '4',
+    },
+  });
+  assert.equal(chatAdvance.kind, 'advance_lesson');
+
   const summary = planTeacherContinuation({
     lessonPlan: plan,
     previousProgress: { currentStep: 2, attempts: 0, status: 'active' },
@@ -587,6 +589,37 @@ test('automatic continuation kind constrains the teacher move without creating s
   assert.equal(recheck.teacher_move, 'question');
   assert.equal(recheck.state, 'check');
   assert.match(recheck.checkpoint, /不带提示/);
+
+  const instructionalRecheck = enforceTeacherContinuationPolicy({
+    teacher_move: 'summary', intent: '结束原题', checkpoint: '重答原题',
+    student_task: {
+      kind: 'knowledge_check',
+      prompt: '执行 int i = 4; int r = ++i + i++; 后，i 和 r 分别是多少？',
+      expected_response: 'i=数字，r=数字',
+    },
+  }, 'instructional_recheck', { focus: '前置与后置自增' });
+  assert.equal(instructionalRecheck.teacher_move, 'question');
+  assert.equal(instructionalRecheck.student_task.kind, 'knowledge_check');
+  assert.equal(instructionalRecheck.student_task.supportContext, 'independent');
+  assert.match(instructionalRecheck.checkpoint, /新同构题/);
+  assert.ok(instructionalRecheck.quick_replies.includes('稍后练习'));
+
+  const missingQuestion = enforceTeacherContinuationPolicy({
+    teacher_move: 'question', intent: '检查迁移', checkpoint: '独立完成这道新同构题',
+    student_task: { kind: 'knowledge_check', prompt: '独立完成这道新同构题' },
+  }, 'instructional_recheck', { focus: '前置与后置自增' });
+  assert.equal(missingQuestion.student_task.kind, 'none');
+
+  const retriedQuestion = enforceTeacherContinuationPolicy({
+    teacher_move: 'question', intent: '检查迁移', checkpoint: '写出 i 和 r 的值',
+    student_task: {
+      kind: 'knowledge_check',
+      prompt: '执行 int i = 4; int r = ++i + i++; 后，i 和 r 分别是多少？',
+      expected_response: 'i=数字，r=数字',
+    },
+  }, 'instructional_recheck_retry', { focus: '前置与后置自增' });
+  assert.equal(retriedQuestion.student_task.kind, 'knowledge_check');
+  assert.match(retriedQuestion.student_task.prompt, /int i = 4/);
 
   const reteach = enforceTeacherContinuationPolicy({
     teacher_move: 'question', intent: '', checkpoint: '',
@@ -839,6 +872,18 @@ test('system prompt establishes a lesson contract and forbids generic praise', (
   assert.match(prompt, /禁止泄露答案或评分键/);
 });
 
+test('Java teacher can open a safe runnable lab without treating execution as mastery', () => {
+  const prompt = buildTeacherSystemPrompt(buildTeacherBrief({
+    subjectName: 'Java 后端开发', assessed: true,
+    lessonPlan: createFallbackLessonPlan({ focus: '++i 与 i++', goal: '理解自增顺序' }),
+    lessonProgress: { currentStep: 0, status: 'active' },
+  }));
+  assert.match(prompt, /coding_lab/);
+  assert.match(prompt, /public class Main/);
+  assert.match(prompt, /文件、网络、进程、反射/);
+  assert.match(prompt, /仅在 student_task 为 practice/);
+});
+
 test('turn directive escalates an existing intervention instead of repeating it', () => {
   const intervention = normalizeLearningDiagnosis({
     category: 'procedure_gap', knowledge_point: '循环累加',
@@ -905,7 +950,7 @@ test('client policy prevents the teacher from pushing explanation back to the st
   const plainTextFallback = enforceTeacherTurnPolicy(null, '为什么初始值是 0？');
   assert.equal(plainTextFallback.teacher_move, 'explain');
   assert.equal(plainTextFallback.state, 'explain');
-  assert.match(plainTextFallback.checkpoint, /小问题/);
+  assert.match(plainTextFallback.checkpoint, /讲清/);
 
   const questionWithUnsupportedJudgment = enforceTeacherTurnPolicy({
     teacher_move: 'explain', intent: '回答问题', checkpoint: '回答一个小问题',
@@ -918,6 +963,18 @@ test('client policy prevents the teacher from pushing explanation back to the st
   });
   assert.equal(summaryTurn.teacher_move, 'summary');
   assert.equal(summaryTurn.state, 'summary');
+});
+
+test('a correct practice answer closes the current task before the lesson advances', () => {
+  const guarded = enforceTeacherTurnPolicy({
+    teacher_move: 'feedback', intent: '确认答案', checkpoint: '再做一道同构题',
+    student_state_update: {
+      knowledge_point: '循环边界', mastery_delta: 0.1, confidence: 0.9,
+      evidence: '学生独立得到正确结果', support_level: 'independent',
+    },
+    student_task: { kind: 'knowledge_check', prompt: '把起点改成 2 后再算一次' },
+  }, '结果是 4', { focus: '循环边界', lessonStep: { phase: 'practice' } });
+  assert.equal(guarded.student_task.kind, 'none');
 });
 
 test('a correct final transfer check leaves no extra unanswered task before summary', () => {
@@ -1174,6 +1231,29 @@ test('repair context survives task normalization and JSON session round trips', 
   assert.doesNotMatch(directive, /3x-6=12,3x=18,x=6/);
 });
 
+test('legacy grading-delegation tasks restore the original task', () => {
+  const restored = normalizeStudentTask({
+    kind: 'diagnostic_check',
+    prompt: '二选一：按上面的核对原则，只回复“7”满足或不满足。',
+    expected_response: '满足或不满足',
+    knowledge_point: '前置与后置自增',
+    repair_context: {
+      id: 'repair-format-1', stage: 'repair_step', attempts: 1,
+      original_error_excerpt: '7', first_error_excerpt: '7',
+      correction_focus: '答案必须同时给出 i 和 r。',
+      original_task: {
+        kind: 'knowledge_check', prompt: '执行后 i 和 r 分别是多少？',
+        expected_response: '一行：i=数字，r=数字', knowledge_point: '前置与后置自增',
+        assessment: { reference_answer: 'i=5,r=8', criteria: ['同时给出两个值'], grading_mode: 'equivalent' },
+      },
+    },
+  }, { teacherMove: 'feedback' });
+  assert.equal(restored.kind, 'knowledge_check');
+  assert.equal(restored.prompt, '执行后 i 和 r 分别是多少?');
+  assert.equal(restored.expectedResponse, '一行:i=数字,r=数字');
+  assert.equal(restored.repairContext.stage, 'retry_original');
+});
+
 test('non-mastery student tasks cannot update mastery', () => {
   const update = normalizeStudentStateUpdate({
     knowledge_point: '循环', mastery_delta: 0.1, confidence: 0.9,
@@ -1199,7 +1279,7 @@ test('classroom regulation and pending choices are not treated as subject attemp
   assert.equal(classifyStudentTurn('为什么结束值不包含 5？', { pendingStudentTask: choiceTask }), 'question');
 });
 
-test('client policy isolates regulation signals and leaves one new task', () => {
+test('client policy isolates regulation signals without interrupting an explanation with a task', () => {
   const guarded = enforceTeacherTurnPolicy({
     teacher_move: 'feedback', intent: '判断回答', checkpoint: '再回答一题',
     student_state_update: { knowledge_point: '循环', mastery_delta: -0.1 },
@@ -1210,8 +1290,7 @@ test('client policy isolates regulation signals and leaves one new task', () => 
   assert.equal(guarded.teacher_move, 'clarify');
   assert.equal(guarded.student_state_update, null);
   assert.equal(guarded.learning_diagnosis, null);
-  assert.equal(guarded.student_task.kind, 'knowledge_check');
-  assert.equal(guarded.student_task.evidenceScope, 'mastery');
+  assert.equal(guarded.student_task.kind, 'none');
 });
 
 test('an abstract checkpoint is aligned to the concrete pending task', () => {
@@ -1223,7 +1302,8 @@ test('an abstract checkpoint is aligned to the concrete pending task', () => {
       assessment: { reference_answer: 'x=7', criteria: ['等式等价'], grading_mode: 'equivalent' },
     },
   }, '为什么符号会变化？', { focus: '一元一次方程移项', phase: 'explain' });
-  assert.equal(guarded.checkpoint, guarded.student_task.prompt);
+  assert.equal(guarded.student_task.kind, 'none');
+  assert.match(guarded.checkpoint, /讲清/);
 });
 
 test('teacher directive receives the exact pending task and protects uncertain answers', () => {
@@ -1299,8 +1379,8 @@ test('visible teacher message and task keep one student action', () => {
       prompt: '写出 2x+5=13 的下一步，并注明两边做了什么',
     },
   }, '为什么移项以后符号会变？', { focus: '一元一次方程移项', phase: 'explain' });
-  assert.equal(guardedTurn.checkpoint, '写出 2x+5=13 的下一步');
-  assert.equal(guardedTurn.student_task.prompt, guardedTurn.checkpoint);
+  assert.match(guardedTurn.checkpoint, /讲清/);
+  assert.equal(guardedTurn.student_task.kind, 'none');
 
   const colloquial = normalizeStudentTask({
     kind: 'knowledge_check', prompt: '写出化简后的等式，并说两边做了什么',
@@ -1343,7 +1423,7 @@ test('visible teacher message and task keep one student action', () => {
   assert.equal(responseFormat.valid, true);
 });
 
-test('student support questions cannot replace the pending task', () => {
+test('student concept questions suspend the pending task and remove follow-up questions', () => {
   const pending = normalizeStudentTask({
     kind: 'knowledge_check',
     prompt: '当 i=2 时，写出 sum 的值',
@@ -1368,12 +1448,11 @@ test('student support questions cannot replace the pending task', () => {
     },
   }, '为什么 sum 不是重新从 0 开始？', { focus: '循环累加', phase: 'explain' }, pending);
 
-  assert.equal(guarded.task_preserved, true);
-  assert.equal(guarded.student_task.key, pending.key);
-  assert.equal(guarded.student_task.prompt, pending.prompt);
-  assert.equal(guarded.checkpoint, pending.prompt);
+  assert.equal(guarded.task_suspended, true);
+  assert.equal(guarded.student_task.kind, 'none');
+  assert.match(guarded.checkpoint, /讲清/);
   const visible = enforceTeacherVisibleMessage(guarded.message, guarded);
   assert.match(visible, /sum 会保存上一轮结果/);
   assert.doesNotMatch(visible, /数组长度是多少/);
-  assert.match(visible, /当前任务继续作答/);
+  assert.doesNotMatch(visible, /继续作答|当前任务/);
 });

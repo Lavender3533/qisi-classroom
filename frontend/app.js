@@ -13,6 +13,11 @@ import {
   validateAssessmentPayload,
 } from './teaching-protocol.js';
 import {
+  deriveEvidenceStage,
+  EVIDENCE_STAGE_META,
+  projectMasteryFromEvidence,
+} from './evidence-driven-instruction.js';
+import {
   buildConfigPayload,
   connectionPresentation,
 } from './app-config.js';
@@ -50,6 +55,7 @@ import {
 } from './teacher-review.js';
 import { createCommandRegistry } from './command-registry.js';
 import { formatJavaAccumulatorTrace, traceSimpleJavaAccumulator } from './code-trace.js';
+import { buildLabSubmission, createJavaLabForFocus, normalizeCodingLab, updateLabAfterRun } from './programming-lab.js';
 import {
   buildLearnerProfile,
   buildReviewQueue,
@@ -92,6 +98,7 @@ import {
   enforceTeacherContinuationPolicy,
   enforceTeacherTurnPolicy,
   getAssessmentInterviewStage,
+  isConcreteStudentTaskPrompt,
   normalizeHomeworkUpdate,
   normalizeLearningDiagnosis,
   normalizeLessonPlan,
@@ -1236,6 +1243,53 @@ async function verifyStudentStateUpdate(subjectId, raw) {
   }
 }
 
+async function resolveCanonicalComponent(subjectId, knowledgePoint) {
+  const components = await invoke('get_canonical_knowledge_components', { subjectId }).catch(() => []);
+  const target = String(knowledgePoint || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+  return components.find(component => String(component.name || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase() === target)
+    || components[0]
+    || null;
+}
+
+async function appendInstructionEvidence({ subjectId, knowledgePoint, structured, teacherBrief, studentUpdate, task }) {
+  const instructionValid = structured?.instruction_contract?.valid === true;
+  if (!instructionValid && !studentUpdate) return false;
+  const component = await resolveCanonicalComponent(subjectId, knowledgePoint);
+  if (!component) return false;
+  const phase = teacherBrief?.lessonStep?.phase || teacherBrief?.phase || '';
+  const supportLevel = studentUpdate?.supportLevel || studentUpdate?.support_level || 'none';
+  const correct = studentUpdate ? Number(studentUpdate.delta) > 0 : null;
+  const stage = instructionValid && !studentUpdate
+    ? 'introduced'
+    : supportLevel === 'prompted' || task?.supportContext === 'scaffolded'
+      ? 'guided'
+      : phase === 'check' && correct
+        ? 'transferred'
+        : 'independent';
+  const taskKey = task?.key || (stage === 'introduced' ? `instruction:${component.canonical_key}:${Date.now()}` : '');
+  const source = stage === 'introduced'
+    ? 'instruction_block'
+    : task?.kind === 'practice' ? 'lesson_ledger' : 'independent_verifier';
+  const evidenceKey = [subjectId, component.canonical_key, stage, taskKey,
+    studentUpdate?.evidence || structured?.message || '', Date.now()].join('|').slice(0, 500);
+  return invoke('append_knowledge_evidence', {
+    evidenceKey,
+    subjectId,
+    canonicalKey: component.canonical_key,
+    stage,
+    taskKey,
+    source,
+    supportLevel: stage === 'introduced' ? 'none' : (supportLevel === 'prompted' ? 'prompted' : 'none'),
+    correct,
+    evidenceExcerpt: String(studentUpdate?.evidence || structured?.message || '').slice(0, 500),
+    delayHours: 0,
+    trusted: stage === 'introduced' ? instructionValid : Boolean(studentUpdate),
+  }).catch(error => {
+    console.warn('分级教学证据保存失败:', error);
+    return false;
+  });
+}
+
 async function persistVerifiedStudentStateUpdate(subjectId, update) {
   if (!subjectId || !update) return;
   try {
@@ -2162,9 +2216,11 @@ async function renderNotesList(container) {
 
 async function generateSubjectIdentity(userHint, category = 'other') {
   const namingMessages = JSON.stringify(buildSubjectNamingMessages(userHint, category));
+  const requestId = crypto.randomUUID();
   let aiResponse = '';
   let namingDone = false;
   const unlistenNaming = await listen('chat-stream', event => {
+    if (event.payload.requestId !== requestId) return;
     if (event.payload.type === 'content') aiResponse += event.payload.text;
     if (event.payload.type === 'done') namingDone = true;
   });
@@ -2174,6 +2230,7 @@ async function generateSubjectIdentity(userHint, category = 'other') {
       apiKey: APP_CONFIG.api_key,
       model: APP_CONFIG.models.fast || APP_CONFIG.models.chat,
       messagesJson: namingMessages,
+      requestId,
     });
   } finally {
     unlistenNaming();
@@ -2301,7 +2358,7 @@ function parseStoredLessonPlan(record) {
 
 async function ensureLessonPlan({
   subjectId, subjectName, assessed, currentLesson, knowledgePoints, recentEvents, mistakes = [],
-  lastLessonSummary = null, teachingPreferences = null,
+  lastLessonSummary = null, teachingPreferences = null, nextLessonFocus = '',
 }) {
   const stored = parseStoredLessonPlan(currentLesson);
   if (stored || !assessed) return { plan: stored, currentLesson, created: false };
@@ -2313,6 +2370,7 @@ async function ensureLessonPlan({
     subjectName, assessed, knowledgePoints, recentEvents, currentLesson, learnerProfile,
     teachingPreferences, teachingMemory: learnerProfile.teachingMemory,
   });
+  const plannedFocus = String(nextLessonFocus || learnerProfile.nextFocus || provisionalBrief.focus || '').trim();
   const learningProfile = {
     subject: subjectName,
     weakest_points: orderedPoints.slice(0, 3).map(point => ({ name: point.name, mastery: Number(point.mastery || 0) })),
@@ -2321,7 +2379,7 @@ async function ensureLessonPlan({
       knowledge_points: event.knowledge_points_json,
       detail: event.detail_json,
     })),
-    suggested_focus: learnerProfile.nextFocus || provisionalBrief.focus,
+    suggested_focus: plannedFocus,
     longitudinal_profile: learnerProfile,
   };
   let plan = null;
@@ -2334,12 +2392,12 @@ async function ensureLessonPlan({
       learningProfileJson: JSON.stringify(learningProfile),
     });
     plan = normalizeLessonPlan(JSON.parse(generated), {
-      subjectName, focus: provisionalBrief.focus, objective: provisionalBrief.goal,
+      subjectName, focus: plannedFocus, objective: provisionalBrief.goal,
     });
   } catch (error) {
     console.warn('AI 教案生成失败，使用本地短课模板:', error);
   }
-  plan ||= createFallbackLessonPlan(provisionalBrief);
+  plan ||= createFallbackLessonPlan({ ...provisionalBrief, focus: plannedFocus });
   try {
     const lessonId = await invoke('save_lesson_plan', {
       subjectId,
@@ -2763,8 +2821,10 @@ async function initAssessment(subjectId) {
 
     try {
       // 先注册监听器，再发起请求
+      const requestId = crypto.randomUUID();
       const unlisten = await listen('chat-stream', (event) => {
         const payload = event.payload;
+        if (payload.requestId !== requestId) return;
         if (payload.type === 'content') {
           botText += payload.text;
           if (requestStatus) requestStatus.textContent = '老师正在组织下一个摸底任务';
@@ -2780,6 +2840,7 @@ async function initAssessment(subjectId) {
         apiKey: APP_CONFIG.api_key,
         model: APP_CONFIG.models.chat,
         messagesJson: JSON.stringify(requestMessages),
+        requestId,
       });
 
       if (botText) {
@@ -3136,6 +3197,7 @@ function renderChatView(container, subjectId) {
         <span id="teacherNext">根据你的学习情况安排</span>
       </div>
       <div class="teacher-desk-actions">
+        ${/java/iu.test(subjectName) ? `<button id="openProgrammingLab" type="button" title="打开 Java 动手实验" aria-label="打开 Java 动手实验">${ICONS.code}</button>` : ''}
         <button id="lessonSummary" type="button" title="生成课堂小结" aria-label="生成课堂小结">${ICONS.barChart}</button>
         <button id="lessonAssessment" type="button" title="开始章节评估" aria-label="开始章节评估">${ICONS.clipboard}</button>
       </div>
@@ -3160,8 +3222,10 @@ function renderChatView(container, subjectId) {
       </header>
       <div class="classroom-board-items" id="classroomBoardItems"></div>
     </section>
-    <div class="messages" id="messages"></div>
-    <div class="composer-shell">
+    <div class="classroom-learning-area" id="classroomLearningArea">
+      <div class="classroom-conversation">
+        <div class="messages" id="messages"></div>
+        <div class="composer-shell">
       <div class="teacher-nudge" id="teacherNudge" role="status" hidden>
         <span>${ICONS.lightbulb}<strong>还在想刚才那一步吗？</strong></span>
         <button type="button" data-nudge="continue">提醒我原任务</button>
@@ -3200,13 +3264,37 @@ function renderChatView(container, subjectId) {
             <button class="btn-primary" id="taskSubmit" type="button">${ICONS.send}<span>提交作答</span></button>
           </div>
         </div>
-        <div class="task-status" id="taskStatus" role="status" aria-live="polite">等待作答</div>
+        <div class="task-status" id="taskStatus" role="status" aria-live="polite"></div>
       </section>
       <div class="composer-meta"><span id="composerHint" role="status" aria-live="polite">自由提问或补充说明</span><span>Enter 发送 · Shift+Enter 换行</span></div>
       <div class="composer">
         <textarea id="input" placeholder="向老师提问，或补充你的思路…" rows="1" aria-label="向${escapeHtml(subjectName)}老师自由提问或补充"></textarea>
         <button id="send" type="button" title="发送" aria-label="发送问题">${ICONS.send}</button>
       </div>
+        </div>
+      </div>
+      <div class="programming-lab-resizer" id="programmingLabResizer" role="separator" aria-label="调整编程实验区宽度" aria-orientation="vertical" tabindex="0" hidden></div>
+      <aside class="programming-lab" id="programmingLab" aria-labelledby="programmingLabTitle" hidden>
+        <header class="programming-lab-header">
+          <span>${ICONS.code}<span><small>动手实验</small><strong id="programmingLabTitle">Java 实验</strong></span></span>
+          <span class="programming-lab-actions">
+            <button id="programmingLabReset" type="button" title="恢复初始代码" aria-label="恢复初始代码">${ICONS.review}</button>
+            <button id="programmingLabClose" type="button" title="收起实验区" aria-label="收起实验区">${ICONS.close}</button>
+          </span>
+        </header>
+        <div class="programming-lab-goal"><strong id="programmingLabGoal"></strong><ul id="programmingLabObservations"></ul></div>
+        <div class="programming-lab-tabs"><button type="button" class="active">Main.java</button><span id="programmingLabRuntime">检测 JDK…</span></div>
+        <div class="programming-lab-editor" id="programmingLabEditor"></div>
+        <div class="programming-lab-toolbar">
+          <button class="btn-primary" id="programmingLabRun" type="button">${ICONS.run}<span>运行</span></button>
+          <button class="btn-secondary" id="programmingLabSubmit" type="button" hidden>${ICONS.send}<span>提交实验</span></button>
+          <span>Ctrl+Enter 运行</span>
+        </div>
+        <section class="programming-lab-console" aria-label="运行控制台">
+          <header><strong>控制台</strong><span id="programmingLabRunMeta">尚未运行</span></header>
+          <pre id="programmingLabOutput">运行后在这里查看真实输出</pre>
+        </section>
+      </aside>
     </div>
   `;
   initChat(subjectId);
@@ -3222,6 +3310,13 @@ async function initChat(subjectId) {
   const classroomBoardEl = document.getElementById('classroomBoard');
   const classroomBoardTitleEl = document.getElementById('classroomBoardTitle');
   const classroomBoardItemsEl = document.getElementById('classroomBoardItems');
+  const programmingLabEl = document.getElementById('programmingLab');
+  const programmingLabResizerEl = document.getElementById('programmingLabResizer');
+  const programmingLabEditorEl = document.getElementById('programmingLabEditor');
+  const programmingLabOutputEl = document.getElementById('programmingLabOutput');
+  const programmingLabRunEl = document.getElementById('programmingLabRun');
+  const programmingLabSubmitEl = document.getElementById('programmingLabSubmit');
+  let programmingLabEditor = null;
   const taskWorkspaceEl = document.getElementById('taskWorkspace');
   const taskLabelEl = document.getElementById('taskLabel');
   const taskKnowledgePointEl = document.getElementById('taskKnowledgePoint');
@@ -3509,7 +3604,11 @@ async function initChat(subjectId) {
     const taskView = deriveClassroomTaskWorkspace(session.pendingStudentTask, {
       pendingAction: session.pendingAction,
     });
-    if (!taskWorkspaceEl || !taskView.visible) {
+    const programmingLabOwnsTask = Boolean(
+      session.programmingLab?.taskKey
+      && session.programmingLab.taskKey === session.pendingStudentTask?.key,
+    );
+    if (!taskWorkspaceEl || !taskView.visible || programmingLabOwnsTask) {
       void syncTaskCodeEditor(false);
       setTaskPanelCollapsed(false);
       messagesEl.classList.remove('has-active-task');
@@ -3521,7 +3620,12 @@ async function initChat(subjectId) {
       draftObservationRequestId += 1;
       hideDraftCoach();
       renderedTaskKey = '';
-      if (composerHintEl) composerHintEl.textContent = '自由提问或补充说明';
+      const lessonPhase = session.lessonPlan?.steps?.[session.lessonProgress?.currentStep]?.phase;
+      if (composerHintEl) composerHintEl.textContent = programmingLabOwnsTask
+        ? '在动手实验区运行并提交，仍可在这里向老师提问'
+        : lessonPhase === 'explain'
+        ? '老师正在讲解，可随时追问'
+        : '自由提问或补充说明';
       return;
     }
 
@@ -3539,7 +3643,8 @@ async function initChat(subjectId) {
     taskLabelEl.textContent = taskView.label;
     taskKnowledgePointEl.textContent = taskView.knowledgePoint || '课堂检查';
     taskExpectedEl.textContent = `回答格式：${taskView.expectedResponse}`;
-    taskPromptEl.textContent = taskView.prompt;
+    taskPromptEl.replaceChildren();
+    appendInlineCode(taskPromptEl, taskView.prompt);
     if (taskOriginalEl) {
       taskOriginalEl.textContent = taskView.originalPrompt ? `原任务：${taskView.originalPrompt}` : '';
       taskOriginalEl.hidden = !taskView.originalPrompt || taskView.originalPrompt === taskView.prompt;
@@ -3578,11 +3683,13 @@ async function initChat(subjectId) {
     const idleStatus = taskView.allowDraftObservation
       ? (draftObservationEnabled ? '草稿自动保存 · 老师观察中' : '草稿自动保存 · 老师观察已暂停')
       : '等待作答';
-    taskStatusEl.textContent = statusText || (busy ? '已提交，老师正在阅读' : idleStatus);
-    if (composerHintEl) composerHintEl.textContent = '当前任务请在上方作答；这里可自由提问或补充';
+    const resolvedStatus = statusText || (busy ? '已提交，老师正在阅读' : idleStatus);
+    taskStatusEl.textContent = resolvedStatus === '等待作答' ? '' : resolvedStatus;
+    if (composerHintEl) composerHintEl.textContent = '完成当前任务后可继续自由提问';
     messagesEl.classList.add('has-active-task');
     composerShellEl?.classList.add('has-active-task');
     taskWorkspaceEl.hidden = false;
+    if (taskChanged) requestAnimationFrame(() => { taskWorkspaceEl.scrollTop = 0; });
   }
 
   const flushTeacherContinuation = async () => {
@@ -3663,6 +3770,7 @@ async function initChat(subjectId) {
     const existingWarmup = ensuredLesson.created ? null : savedSession?.reviewWarmup || null;
     const shouldPlanWarmup = Boolean(subject?.assessed)
       && !savedSession?.lessonStarted
+      && !savedSession?.skipOpeningWarmup
       && !savedSession?.pendingAction
       && !savedSession?.activeIntervention
       && Number(lessonProgress.currentStep || 0) === 0;
@@ -3734,6 +3842,79 @@ async function initChat(subjectId) {
   } catch (error) {
     console.warn('读取教师教学简报失败:', error);
   }
+
+  let labDraftTimer = null;
+  const renderProgrammingLab = async (rawLab = null) => {
+    if (!programmingLabEl || !programmingLabEditorEl) return;
+    const session = state.teachingSessions[subjectId] || {};
+    const source = rawLab || session.programmingLab || createJavaLabForFocus(teacherBrief.focus);
+    const activeLabTaskKey = session.pendingStudentTask?.kind === 'practice'
+      ? session.pendingStudentTask.key
+      : '';
+    const lab = normalizeCodingLab(source, {
+      focus: teacherBrief.focus,
+      taskKey: activeLabTaskKey,
+    });
+    if (!lab) return;
+    const restored = session.programmingLab?.id === lab.id
+      ? { ...lab, ...session.programmingLab, initialCode: lab.initialCode }
+      : lab;
+    await persistTeachingSession(subjectId, { programmingLab: restored, programmingLabOpen: true });
+    programmingLabEl.hidden = false;
+    if (programmingLabResizerEl) {
+      programmingLabResizerEl.hidden = false;
+      programmingLabResizerEl.setAttribute('aria-orientation', matchMedia('(max-width: 1450px)').matches ? 'horizontal' : 'vertical');
+    }
+    document.getElementById('programmingLabTitle').textContent = restored.title;
+    const fileTab = programmingLabEl.querySelector('.programming-lab-tabs button');
+    if (fileTab) fileTab.textContent = restored.fileName;
+    document.getElementById('programmingLabGoal').textContent = restored.goal;
+    document.getElementById('programmingLabObservations').innerHTML = restored.observations
+      .map(item => `<li>${escapeHtml(item)}</li>`).join('');
+    const result = restored.runResult;
+    programmingLabOutputEl.textContent = result
+      ? [result.stdout, result.stderr].filter(Boolean).join('\n') || '程序没有输出'
+      : '运行后在这里查看真实输出';
+    const runMeta = document.getElementById('programmingLabRunMeta');
+    if (runMeta) runMeta.textContent = result
+      ? `${result.success ? '运行成功' : '运行失败'} · ${result.executionTimeMs} ms`
+      : '尚未运行';
+    if (programmingLabSubmitEl) programmingLabSubmitEl.hidden = !(restored.taskKey && restored.runResult);
+    if (!programmingLabEditor) {
+      const { createTaskCodeEditor } = await import('./codemirror-setup.js');
+      programmingLabEditor = createTaskCodeEditor(programmingLabEditorEl, {
+        initialCode: restored.code,
+        language: 'java',
+        placeholder: '在这里编写 Java 代码…',
+        onSubmit: () => programmingLabRunEl?.click(),
+        onChange: code => {
+          const current = state.teachingSessions[subjectId]?.programmingLab;
+          if (!current) return;
+          const changed = { ...current, code, dirty: code !== current.initialCode, status: 'ready', runResult: null };
+          state.teachingSessions[subjectId].programmingLab = changed;
+          if (programmingLabSubmitEl) programmingLabSubmitEl.hidden = true;
+          clearTimeout(labDraftTimer);
+          labDraftTimer = setTimeout(() => void persistTeachingSession(subjectId, { programmingLab: changed }), 450);
+        },
+      });
+    } else {
+      programmingLabEditor.setValue(restored.code);
+    }
+    invoke('check_java_runtime').then(version => {
+      const runtime = document.getElementById('programmingLabRuntime');
+      if (runtime) runtime.textContent = version;
+    }).catch(error => {
+      const runtime = document.getElementById('programmingLabRuntime');
+      if (runtime) runtime.textContent = String(error || 'JDK 不可用');
+      if (programmingLabRunEl) programmingLabRunEl.disabled = true;
+    });
+  };
+
+  const closeProgrammingLab = () => {
+    if (programmingLabEl) programmingLabEl.hidden = true;
+    if (programmingLabResizerEl) programmingLabResizerEl.hidden = true;
+    void persistTeachingSession(subjectId, { programmingLabOpen: false });
+  };
 
   const teacherPhase = document.getElementById('teacherPhase');
   const teacherGoal = document.getElementById('teacherGoal');
@@ -3958,25 +4139,39 @@ async function initChat(subjectId) {
     return verifiedUpdate;
   };
   const resumeStrip = document.getElementById('resumeStrip');
-  if (resumeStrip && subject?.assessed && resumeContext) {
+  const renderResumeSuggestion = () => {
+    if (!resumeStrip || !subject?.assessed || !resumeContext) return;
+    const session = state.teachingSessions[subjectId] || {};
     const currentWarmup = state.teachingSessions[subjectId]?.reviewWarmup;
     const weakest = [...(resumeContext.knowledgePoints || [])]
       .sort((a, b) => Number(a.mastery || 0) - Number(b.mastery || 0))[0];
     const lessonTitle = resumeContext.currentLesson?.title || teacherBrief.focus;
     const warmupActive = currentWarmup && ['scheduled', 'awaiting_response', 'remediate'].includes(currentWarmup.status);
-    const detail = warmupActive
+    const lessonCompleted = session.lessonProgress?.status === 'completed';
+    const nextLessonFocus = String(session.lastLessonSummary?.next_lesson_focus || '').trim();
+    const detail = lessonCompleted
+      ? '本节已经完成。新课会沿用当前对话和学习档案，并先由老师讲解。'
+      : warmupActive
       ? `老师会先检查“${currentWarmup.knowledgePoint}”，完成后自动进入“${lessonTitle}”。`
       : weakest && Number(weakest.mastery || 0) < 0.65
         ? `上次学到“${lessonTitle}”，先巩固“${weakest.name}”。`
         : `上次学到“${lessonTitle}”，可以从当前进度继续。`;
-    document.getElementById('resumeTitle').textContent = warmupActive
+    document.getElementById('resumeTitle').textContent = lessonCompleted
+      ? `下一节：${nextLessonFocus || '继续新的学习重点'}`
+      : warmupActive
       ? '课前检索热身'
       : `继续学习：${lessonTitle}`;
     document.getElementById('resumeDetail').textContent = detail;
+    const continueButton = document.getElementById('resumeContinue');
+    if (continueButton) {
+      continueButton.textContent = lessonCompleted ? '开始下一节' : '继续上次';
+      continueButton.dataset.action = lessonCompleted ? 'next-lesson' : 'resume';
+    }
     const actions = resumeStrip.querySelector('.resume-strip-actions');
     if (actions) actions.hidden = warmupActive;
     resumeStrip.hidden = false;
-  }
+  };
+  renderResumeSuggestion();
 
   const memoryHistory = (state.chatHistory[subjectId] || [])
     .slice(1)
@@ -4368,8 +4563,10 @@ async function initChat(subjectId) {
       const requestMessages = [history[0], { role: 'system', content: turnDirective }, ...history.slice(1)];
 
       // 先注册监听器，再发起请求（避免事件丢失）
+      const requestId = crypto.randomUUID();
       const unlisten = await listen('chat-stream', (event) => {
         const payload = event.payload;
+        if (payload.requestId !== requestId) return;
         if (payload.type === 'reasoning') {
           if (requestStatus) requestStatus.textContent = '正在分析你的思路';
         } else if (payload.type === 'content') {
@@ -4388,6 +4585,7 @@ async function initChat(subjectId) {
         apiKey: APP_CONFIG.api_key,
         model: APP_CONFIG.models.chat,
         messagesJson: JSON.stringify(requestMessages),
+        requestId,
       });
 
       if (botText) {
@@ -4503,6 +4701,14 @@ async function initChat(subjectId) {
           previousTeacherMove: classroomSession.lastTeacherMove?.move || '',
           pendingStudentTask: respondingStudentTask,
         });
+        await appendInstructionEvidence({
+          subjectId,
+          knowledgePoint: verifiedStudentStateUpdate?.knowledgePoint || teacherBrief.focus,
+          structured,
+          teacherBrief,
+          studentUpdate: verifiedStudentStateUpdate,
+          task: respondingStudentTask,
+        });
         const taskAllowsDiagnosis = studentTaskAllowsDiagnosisEvidence(respondingStudentTask);
         const interventionTransition = internalCommand || !taskAllowsDiagnosis
           ? {
@@ -4547,10 +4753,24 @@ async function initChat(subjectId) {
             knowledgePoint: teacherBrief.focus,
           })
           : null;
-        let teacherContinuation = internalCommand ? null : planRepairContinuation({
-          task: respondingStudentTask,
-          verification: answerVerification,
+        const proposedProgrammingLab = normalizeCodingLab(structured?.coding_lab, {
+          focus: teacherBrief.focus,
+          taskKey: nextStudentTask?.kind === 'practice' ? nextStudentTask?.key : '',
         });
+        let teacherContinuation = internalCommand || teacherBrief.lessonStep?.phase !== 'practice'
+          ? null
+          : planRepairContinuation({
+            task: respondingStudentTask,
+            verification: answerVerification,
+          });
+        if (internalCommand && continuationKind === 'instructional_recheck'
+          && nextStudentTask?.kind === 'none') {
+          teacherContinuation = {
+            kind: 'instructional_recheck_retry',
+            key: `instructional-recheck-retry:${Date.now()}`,
+            command: `${text}\n\n上一次响应遗漏了可作答的新题。请立即补充一道具体的新同构题，student_task.prompt 必须包含完整题面，不能只写“完成这道新同构题”等动作标签；同时提供明确 expected_response 和隐藏 assessment。不要重复原题讲解，不要公布新题答案。`,
+          };
+        }
         if (teacherMove) {
           renderTeacherMoveFooter(botEl.parentElement, teacherMove, nextStudentTask);
           const session = state.teachingSessions[subjectId] || {};
@@ -4616,7 +4836,8 @@ async function initChat(subjectId) {
                 supportLevel: verifiedStudentStateUpdate?.supportLevel || 'independent',
               },
             });
-          } else if (!teacherContinuation && !internalCommand && !isReviewResponse) {
+          } else if (!teacherContinuation && !isReviewResponse
+            && (!internalCommand || !continuationKind)) {
             teacherContinuation = planTeacherContinuation({
               lessonPlan: session.lessonPlan,
               previousProgress,
@@ -4694,6 +4915,13 @@ async function initChat(subjectId) {
             reviewWarmup: nextReviewWarmup,
             pendingStudentTask: nextStudentTask,
             teachingBoard,
+            ...(proposedProgrammingLab ? { programmingLab: proposedProgrammingLab, programmingLabOpen: true } : {}),
+            ...(studentTurnType === 'question' && respondingStudentTask?.kind !== 'none'
+              ? {
+                suspendedStudentTask: respondingStudentTask,
+                pendingAction: null,
+              }
+              : {}),
             ...(interventionTransition.resolvedIntervention
               ? { lastResolvedIntervention: interventionTransition.resolvedIntervention }
               : {}),
@@ -4723,6 +4951,8 @@ async function initChat(subjectId) {
         if (teacherContinuation?.kind === 'lesson_summary' && structured) structured.actions = [];
         await handleStructuredResponse(structured, messagesEl, subjectId, verifiedStudentStateUpdate);
         renderClassroomWorkspace();
+        if (proposedProgrammingLab) await renderProgrammingLab(proposedProgrammingLab);
+        renderResumeSuggestion();
         queueTeacherContinuation(teacherContinuation);
         updateRightPanel(subject);
         responseCompleted = true;
@@ -4905,6 +5135,8 @@ async function initChat(subjectId) {
     }
     const sourceTaskKey = taskWorkspaceEl?.dataset.taskKey || '';
     void send('我卡在当前任务上了，请只给我一个方向性提示，不要直接公布答案。', {
+      hideStudentMessage: true,
+      internalCommand: true,
       sourceTaskKey,
       studentAction: 'support',
     });
@@ -4912,6 +5144,8 @@ async function initChat(subjectId) {
   taskAlternateEl?.addEventListener('click', () => {
     const sourceTaskKey = taskWorkspaceEl?.dataset.taskKey || '';
     void send('当前讲法我还不清楚，请换一种表示方式讲同一个点，并保留当前任务。', {
+      hideStudentMessage: true,
+      internalCommand: true,
       sourceTaskKey,
       studentAction: 'support',
     });
@@ -4921,10 +5155,124 @@ async function initChat(subjectId) {
     const button = event.target.closest('[data-reply]');
     if (!button || sendBtn.disabled) return;
     const sourceTaskKey = taskWorkspaceEl?.dataset.taskKey || '';
-    void send(button.dataset.reply || '', sourceTaskKey
+    const reply = button.dataset.reply || '';
+    if (reply === '稍后练习' && sourceTaskKey) {
+      const session = state.teachingSessions[subjectId] || {};
+      const task = session.pendingStudentTask;
+      if (isCurrentTaskSubmission(task, sourceTaskKey)) {
+        void persistTeachingSession(subjectId, {
+          pendingStudentTask: { kind: 'none' },
+          deferredRecheck: { task, deferredAt: new Date().toISOString() },
+        }).then(() => {
+          renderClassroomWorkspace();
+          if (teacherNudgeEl) {
+            teacherNudgeEl.hidden = false;
+            const title = teacherNudgeEl.querySelector('strong');
+            const resume = teacherNudgeEl.querySelector('[data-nudge="continue"]');
+            if (title) title.textContent = '这道迁移练习已保存';
+            if (resume) resume.textContent = '继续练习';
+          }
+          showToast('已保存，稍后可以继续这道练习', 'success');
+        });
+      }
+      return;
+    }
+    void send(reply, sourceTaskKey
       ? { sourceTaskKey, studentAction: 'answer' }
       : {});
   });
+
+  document.getElementById('openProgrammingLab')?.addEventListener('click', () => void renderProgrammingLab());
+  document.getElementById('programmingLabClose')?.addEventListener('click', closeProgrammingLab);
+  document.getElementById('programmingLabReset')?.addEventListener('click', () => {
+    const lab = state.teachingSessions[subjectId]?.programmingLab;
+    if (!lab || !programmingLabEditor) return;
+    programmingLabEditor.setValue(lab.initialCode);
+    showToast('已恢复实验初始代码', 'success');
+  });
+  programmingLabRunEl?.addEventListener('click', async () => {
+    const lab = state.teachingSessions[subjectId]?.programmingLab;
+    if (!lab || !programmingLabEditor) return;
+    programmingLabRunEl.disabled = true;
+    programmingLabRunEl.querySelector('span').textContent = '运行中…';
+    programmingLabOutputEl.textContent = '正在调用本机 JDK 编译并运行…';
+    try {
+      const code = programmingLabEditor.getValue();
+      const result = await invoke('run_java_code', { code });
+      const updated = updateLabAfterRun({ ...lab, code }, result);
+      await persistTeachingSession(subjectId, { programmingLab: updated });
+      programmingLabOutputEl.textContent = [updated.runResult.stdout, updated.runResult.stderr]
+        .filter(Boolean).join('\n') || '程序没有输出';
+      const meta = document.getElementById('programmingLabRunMeta');
+      if (meta) meta.textContent = `${updated.runResult.success ? '运行成功' : '运行失败'} · ${updated.runResult.executionTimeMs} ms`;
+      programmingLabOutputEl.dataset.status = updated.runResult.success ? 'success' : 'error';
+      if (programmingLabSubmitEl) programmingLabSubmitEl.hidden = !(updated.taskKey && updated.runResult);
+      await logLearningEvent(subjectId, 'programming_lab_run', [teacherBrief.focus], {
+        labId: updated.id, success: updated.runResult.success, errorType: updated.runResult.errorType,
+        executionTimeMs: updated.runResult.executionTimeMs, taskKey: updated.taskKey || null,
+      });
+    } catch (error) {
+      programmingLabOutputEl.textContent = String(error || 'Java 运行失败');
+      programmingLabOutputEl.dataset.status = 'error';
+    } finally {
+      programmingLabRunEl.disabled = false;
+      programmingLabRunEl.querySelector('span').textContent = '运行';
+    }
+  });
+  programmingLabSubmitEl?.addEventListener('click', () => {
+    const lab = state.teachingSessions[subjectId]?.programmingLab;
+    const submission = buildLabSubmission(lab);
+    const currentTask = state.teachingSessions[subjectId]?.pendingStudentTask;
+    if (!submission || currentTask?.key !== submission.taskKey) {
+      showToast('当前实验没有绑定可提交的课堂任务', 'error');
+      return;
+    }
+    void send(`我完成了 Java 动手实验。\n\n\`\`\`java\n${submission.code}\n\`\`\`\n\n真实运行结果：\n\`\`\`text\n${submission.stdout || submission.stderr || '无输出'}\n\`\`\``, {
+      hideStudentMessage: true,
+      sourceTaskKey: submission.taskKey,
+      studentAction: 'answer',
+    });
+  });
+  if (programmingLabResizerEl) {
+    programmingLabResizerEl.addEventListener('pointerdown', event => {
+      programmingLabResizerEl.setPointerCapture(event.pointerId);
+      const stacked = matchMedia('(max-width: 1450px)').matches;
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startWidth = programmingLabEl.getBoundingClientRect().width;
+      const startHeight = programmingLabEl.getBoundingClientRect().height;
+      const move = moveEvent => {
+        if (stacked) {
+          const height = Math.max(300, Math.min(window.innerHeight * 0.7, startHeight + startY - moveEvent.clientY));
+          programmingLabEl.style.height = `${height}px`;
+          localStorage.setItem('warmclassroom.programmingLabHeight', String(height));
+          return;
+        }
+        const width = Math.max(320, Math.min(720, startWidth + startX - moveEvent.clientX));
+        programmingLabEl.style.width = `${width}px`;
+        localStorage.setItem('warmclassroom.programmingLabWidth', String(width));
+      };
+      const end = () => {
+        programmingLabResizerEl.removeEventListener('pointermove', move);
+        programmingLabResizerEl.removeEventListener('pointerup', end);
+      };
+      programmingLabResizerEl.addEventListener('pointermove', move);
+      programmingLabResizerEl.addEventListener('pointerup', end);
+    });
+    programmingLabResizerEl.addEventListener('keydown', event => {
+      const stacked = matchMedia('(max-width: 1450px)').matches;
+      const allowed = stacked ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
+      if (!allowed.includes(event.key)) return;
+      event.preventDefault();
+      if (stacked) {
+        const height = programmingLabEl.getBoundingClientRect().height + (event.key === 'ArrowUp' ? 24 : -24);
+        programmingLabEl.style.height = `${Math.max(300, Math.min(window.innerHeight * 0.7, height))}px`;
+        return;
+      }
+      const width = programmingLabEl.getBoundingClientRect().width + (event.key === 'ArrowLeft' ? 24 : -24);
+      programmingLabEl.style.width = `${Math.max(320, Math.min(720, width))}px`;
+    });
+  }
 
   document.getElementById('resumeReview')?.addEventListener('click', () => {
     const weakPoint = resumeContext?.brief?.focus || teacherBrief.focus;
@@ -4933,7 +5281,69 @@ async function initChat(subjectId) {
       internalCommand: true,
     });
   });
-  document.getElementById('resumeContinue')?.addEventListener('click', () => {
+  const startNextLesson = async button => {
+    const session = state.teachingSessions[subjectId] || {};
+    const nextLessonFocus = String(session.lastLessonSummary?.next_lesson_focus || '').trim();
+    button.disabled = true;
+    button.textContent = '正在准备…';
+    try {
+      if (resumeContext?.currentLesson?.id) {
+        await invoke('complete_lesson_plan', { lessonPlanId: resumeContext.currentLesson.id }).catch(() => null);
+      }
+      const ensuredLesson = await ensureLessonPlan({
+        subjectId,
+        subjectName,
+        assessed: true,
+        currentLesson: null,
+        knowledgePoints: resumeContext?.knowledgePoints || [],
+        recentEvents: resumeContext?.recentEvents || [],
+        mistakes: resumeContext?.mistakes || [],
+        lastLessonSummary: session.lastLessonSummary || null,
+        teachingPreferences: session.teachingPreferences,
+        nextLessonFocus,
+      });
+      const lessonProgress = {
+        currentStep: 0,
+        attempts: 0,
+        status: 'active',
+        gateVersion: 1,
+        legacyThroughStep: -1,
+        evidenceLedger: { records: [] },
+      };
+      await persistTeachingSession(subjectId, {
+        lessonPlan: ensuredLesson.plan,
+        lessonProgress,
+        lessonStarted: false,
+        skipOpeningWarmup: true,
+        reviewWarmup: null,
+        pendingStudentTask: { kind: 'none' },
+        suspendedStudentTask: null,
+        deferredRecheck: null,
+        pendingAction: null,
+        activeIntervention: null,
+        teachingBoard: null,
+        programmingLab: null,
+        programmingLabOpen: false,
+        lastTeacherMove: null,
+        lastTeacherContinuationKey: null,
+        lastTeacherContinuationKind: null,
+        lastProactiveNudgeKey: null,
+      });
+      showToast(`已准备下一节：${ensuredLesson.plan?.title || nextLessonFocus || '新课'}`, 'success');
+      const chatTab = state.tabs.find(tab => tab.id === `chat-${subjectId}`);
+      if (chatTab) renderTabContent(chatTab);
+    } catch (error) {
+      console.error('开始下一节失败:', error);
+      showToast('下一节准备失败，请稍后重试', 'error');
+      button.disabled = false;
+      button.textContent = '开始下一节';
+    }
+  };
+  document.getElementById('resumeContinue')?.addEventListener('click', event => {
+    if (event.currentTarget.dataset.action === 'next-lesson') {
+      void startNextLesson(event.currentTarget);
+      return;
+    }
     void send(`老师，请从上次的“${teacherBrief.focus}”继续。先用一句话回顾，再给我一个具体任务。`, {
       hideStudentMessage: true,
       internalCommand: true,
@@ -4945,6 +5355,20 @@ async function initChat(subjectId) {
     teacherNudgeEl.hidden = true;
     if (action === 'continue') {
       const session = state.teachingSessions[subjectId] || {};
+      if (session.suspendedStudentTask?.kind && session.suspendedStudentTask.kind !== 'none') {
+        void persistTeachingSession(subjectId, {
+          pendingStudentTask: session.suspendedStudentTask,
+          suspendedStudentTask: null,
+        }).then(() => renderClassroomWorkspace());
+        return;
+      }
+      if (session.deferredRecheck?.task) {
+        void persistTeachingSession(subjectId, {
+          pendingStudentTask: session.deferredRecheck.task,
+          deferredRecheck: null,
+        }).then(() => renderClassroomWorkspace());
+        return;
+      }
       const task = session.pendingStudentTask;
       const nudgeKey = task?.key || '';
       if (nudgeKey) void persistTeachingSession(subjectId, { lastProactiveNudgeKey: nudgeKey });
@@ -4982,6 +5406,76 @@ async function initChat(subjectId) {
   });
 
   renderExistingHistory();
+  const loadedSession = state.teachingSessions[subjectId] || {};
+  const legacyRepairTask = loadedSession.pendingStudentTask;
+  const legacyRepairContinuation = legacyRepairTask?.repairContext
+    ? planRepairContinuation({
+      task: legacyRepairTask,
+      verification: {
+        trusted: true,
+        verdict: 'incorrect',
+        firstErrorExcerpt: legacyRepairTask.repairContext.firstErrorExcerpt || 'legacy-repair',
+      },
+    })
+    : null;
+  const staleRecheckContinuation = legacyRepairTask?.kind !== 'none'
+    && /同构|变式|独立完成/u.test(String(legacyRepairTask?.prompt || ''))
+    && !isConcreteStudentTaskPrompt(legacyRepairTask?.prompt)
+    ? {
+      kind: 'instructional_recheck_retry',
+      key: `restore-missing-recheck:${legacyRepairTask.key || legacyRepairTask.prompt}`.slice(0, 220),
+      command: `当前对话中上一道迁移练习只保存了动作标签，没有实际题面。请结合本对话刚讲过的内容，围绕“${teacherBrief.focus || '当前知识点'}”立即补充一道具体的新同构题。student_task.prompt 必须写出完整题面，不能写“完成这道新同构题”等占位语；同时提供明确 expected_response 和隐藏 assessment。不要重讲原题，不要公布新题答案。`,
+    }
+    : null;
+  const currentLessonStep = loadedSession.lessonPlan?.steps?.[loadedSession.lessonProgress?.currentStep];
+  const summaryStepIndex = loadedSession.lessonPlan?.steps?.findIndex(step => step.phase === 'summary') ?? -1;
+  const independentSuccesses = (loadedSession.teachingMemory?.effectiveStrategies || [])
+    .filter(item => item.strategy === 'independent_recheck')
+    .reduce((sum, item) => sum + (Number(item.independentSuccesses) || 0), 0);
+  const shouldCloseLegacyRecheckChain = currentLessonStep?.phase === 'check'
+    && loadedSession.lastTeacherMove?.teachingStrategy === 'independent_recheck'
+    && independentSuccesses >= 2
+    && summaryStepIndex >= 0;
+  const shouldDiscardChainedRecheck = currentLessonStep?.phase === 'check'
+    && loadedSession.pendingStudentTask?.cadenceRole === 'transfer_check'
+    && ['instructional_recheck', 'instructional_recheck_retry'].includes(
+      loadedSession.lastTeacherContinuationKind,
+    );
+  const recoveredProgress = shouldCloseLegacyRecheckChain
+    ? { ...loadedSession.lessonProgress, currentStep: summaryStepIndex, attempts: 0, status: 'active' }
+    : null;
+  const cadenceRecoveryContinuation = recoveredProgress
+    ? planTeacherContinuation({
+      lessonPlan: loadedSession.lessonPlan,
+      previousProgress: loadedSession.lessonProgress,
+      nextProgress: recoveredProgress,
+      source: 'chat',
+      evidence: {
+        correct: true,
+        knowledgePoint: loadedSession.lessonPlan.focus,
+        answer: loadedSession.teachingMemory?.effectiveStrategies?.[0]?.lastEvidence || '已有两次独立正确证据',
+        supportLevel: 'independent',
+      },
+    })
+    : null;
+  const restoredContinuation = cadenceRecoveryContinuation
+    || legacyRepairContinuation
+    || staleRecheckContinuation;
+  if (restoredContinuation) {
+    await persistTeachingSession(subjectId, {
+      pendingStudentTask: { kind: 'none' },
+      pendingAction: null,
+      ...(recoveredProgress ? { lessonProgress: recoveredProgress } : {}),
+    });
+  } else if (shouldDiscardChainedRecheck) {
+    await persistTeachingSession(subjectId, {
+      pendingStudentTask: { kind: 'none' },
+      pendingAction: null,
+      lastTeacherContinuationKind: null,
+    });
+  } else if (loadedSession.pendingAction && loadedSession.pendingStudentTask?.kind !== 'none') {
+    await persistTeachingSession(subjectId, { pendingAction: null });
+  }
   const pendingAction = state.teachingSessions[subjectId]?.pendingAction;
   if (pendingAction?.type === 'open_practice_panel' && pendingAction.practice) {
     await practicePanel.open(pendingAction.practice);
@@ -4989,8 +5483,30 @@ async function initChat(subjectId) {
     quizPanel.open(pendingAction.quiz, subjectId);
   }
   renderClassroomWorkspace();
+  const savedLabWidth = Number(localStorage.getItem('warmclassroom.programmingLabWidth'));
+  if (programmingLabEl && savedLabWidth) programmingLabEl.style.width = `${Math.max(320, Math.min(720, savedLabWidth))}px`;
+  const savedLabHeight = Number(localStorage.getItem('warmclassroom.programmingLabHeight'));
+  if (programmingLabEl && savedLabHeight) programmingLabEl.style.height = `${Math.max(300, Math.min(window.innerHeight * 0.7, savedLabHeight))}px`;
+  if (loadedSession.programmingLabOpen && loadedSession.programmingLab) {
+    await renderProgrammingLab(loadedSession.programmingLab);
+  }
+  if (state.teachingSessions[subjectId]?.deferredRecheck?.task && teacherNudgeEl) {
+    teacherNudgeEl.hidden = false;
+    const title = teacherNudgeEl.querySelector('strong');
+    const resume = teacherNudgeEl.querySelector('[data-nudge="continue"]');
+    if (title) title.textContent = '上次保存了一道迁移练习';
+    if (resume) resume.textContent = '继续练习';
+  }
+  if (state.teachingSessions[subjectId]?.suspendedStudentTask?.kind !== 'none' && teacherNudgeEl) {
+    teacherNudgeEl.hidden = false;
+    const title = teacherNudgeEl.querySelector('strong');
+    const resume = teacherNudgeEl.querySelector('[data-nudge="continue"]');
+    if (title) title.textContent = '刚才的练习已暂停';
+    if (resume) resume.textContent = '继续练习';
+  }
   inputEl.disabled = false;
   sendBtn.disabled = false;
+  queueTeacherContinuation(restoredContinuation);
   const initialTaskView = deriveClassroomTaskWorkspace(
     state.teachingSessions[subjectId]?.pendingStudentTask,
     { pendingAction: state.teachingSessions[subjectId]?.pendingAction },
@@ -5011,9 +5527,9 @@ async function initChat(subjectId) {
     } else if (['awaiting_response', 'remediate'].includes(warmupStatus)) {
       scheduleProactiveNudge();
     } else {
-      await persistTeachingSession(subjectId, { lessonStarted: true });
+      await persistTeachingSession(subjectId, { lessonStarted: true, skipOpeningWarmup: false });
       void send(
-        '请按当前教案主动开始本节课：先完成当前步骤的讲解，再给一个低负担检查。不要等待学生先提问。',
+        '请按当前教案主动开始本节课。若当前是讲解步骤，请完整完成“概念模型、最小例子、关键对比和小结”，本轮不要出题；只有进入练习或检查步骤后才生成一个任务。不要等待学生先提问。',
         { hideStudentMessage: true, internalCommand: true },
       );
     }
@@ -6170,12 +6686,16 @@ async function updateRightPanel(subject) {
   let mistakes = [];
   let events = [];
   let sessionJson = null;
+  let canonicalComponents = [];
+  let evidenceRecords = [];
   try {
-    [knowledgePoints, mistakes, events, sessionJson] = await Promise.all([
+    [knowledgePoints, mistakes, events, sessionJson, canonicalComponents, evidenceRecords] = await Promise.all([
       invoke('get_knowledge_points', { subjectId: subject.id }).catch(() => []),
       invoke('get_mistakes', { subjectId: subject.id }).catch(() => []),
       invoke('get_learning_events', { subjectId: subject.id }).catch(() => []),
       invoke('get_teaching_session', { subjectId: subject.id }).catch(() => null),
+      invoke('get_canonical_knowledge_components', { subjectId: subject.id }).catch(() => []),
+      invoke('get_knowledge_evidence_records', { subjectId: subject.id, canonicalKey: null }).catch(() => []),
     ]);
   } catch {}
   if (!state.teachingSessions[subject.id] && sessionJson) {
@@ -6186,6 +6706,13 @@ async function updateRightPanel(subject) {
     ? Math.round(knowledgePoints.reduce((s, p) => s + (p.mastery || 0), 0) / knowledgePoints.length * 100)
     : 0;
   const weakPoints = knowledgePoints.filter(p => (p.mastery || 0) < 0.5);
+  const evidenceProfiles = canonicalComponents.map(component => {
+    const records = evidenceRecords.filter(record => record.canonical_key === component.canonical_key);
+    const derived = deriveEvidenceStage(records);
+    const legacy = knowledgePoints.find(point => point.name === component.name)?.mastery || 0;
+    return { ...component, ...derived, mastery: projectMasteryFromEvidence(records, { legacyMastery: legacy }) };
+  });
+  const advancedProfiles = evidenceProfiles.filter(item => item.canAdvance);
   const recentEvents = (events || []).slice(0, 5);
   const teachingSession = state.teachingSessions[subject.id] || {};
   const lastLessonSummary = teachingSession.lastLessonSummary || null;
@@ -6223,13 +6750,15 @@ async function updateRightPanel(subject) {
         <div class="pf-label">摸底状态</div>
         <div class="pf-value">${subject.assessed ? `<span class="status-with-icon success"><span class="inline-icon" aria-hidden="true">${ICONS.check}</span>已完成</span>` : `<span class="status-with-icon pending">待完成</span>`}</div>
       </div>
-      ${knowledgePoints.length > 0 ? `
+      ${evidenceProfiles.length > 0 ? `
       <div class="profile-field">
-        <div class="pf-label">整体掌握度</div>
-        <div class="pf-value">
-          <div class="mastery-bar-wrap"><div class="mastery-bar" style="width:${totalMastery}%"></div></div>
-          <span class="mastery-pct">${totalMastery}%</span>
-        </div>
+        <div class="pf-label">学习证据</div>
+        <div class="pf-value evidence-overview"><strong>${advancedProfiles.length} / ${evidenceProfiles.length}</strong><span>项当前可推进</span></div>
+      </div>
+      ` : knowledgePoints.length > 0 ? `
+      <div class="profile-field legacy-mastery-field">
+        <div class="pf-label">历史估计</div>
+        <div class="pf-value"><span class="mastery-pct">${totalMastery}%</span><small>旧课程数据，尚未分级验证</small></div>
       </div>
       ` : ''}
       <div class="profile-field">
@@ -6237,6 +6766,19 @@ async function updateRightPanel(subject) {
         <div class="pf-value">${studentTurns > 0 ? `${studentTurns} 轮对话` : '尚未开始'}${mistakes.length > 0 ? ` · ${mistakes.length} 道错题` : ''}</div>
       </div>
     </div>
+    ${evidenceProfiles.length ? `
+    <div class="profile-card evidence-profile-card">
+      <div class="pf-label">当前证据阶段</div>
+      <div class="evidence-stage-list">
+        ${evidenceProfiles.slice(0, 6).map(item => `
+          <div class="evidence-stage-row" data-stage="${item.stage}">
+            <div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(EVIDENCE_STAGE_META[item.stage]?.label || '尚无证据')}</span></div>
+            <small>${item.pendingRetention ? '当前可推进 · 待延迟复习' : escapeHtml(item.next)}</small>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    ` : ''}
     ${renderLessonEvidencePanel(teachingSession)}
     ${weakPoints.length > 0 ? `
     <div class="profile-card">

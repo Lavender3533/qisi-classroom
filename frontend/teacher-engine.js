@@ -1,3 +1,5 @@
+import { validateInstructionBlock } from './evidence-driven-instruction.js';
+
 const PHASE_META = {
   diagnose: { label: '了解学情', nextAction: '先问一个能看出思路的问题，再决定从哪里讲起' },
   review: { label: '检索热身', nextAction: '先用一道不带提示的短题唤起旧知识，再开始本节新内容' },
@@ -368,6 +370,19 @@ export function normalizeStudentTask(raw, {
     source.repair_context || source.repairContext,
     point,
   );
+  const delegatedJudgment = /(?:按上面的核对原则|判断原答案).{0,40}(?:满足或不满足|是否满足)/u.test(prompt)
+    || expectedResponse === '满足或不满足';
+  if (delegatedJudgment && repairContext?.originalTask) {
+    return normalizeStudentTask({
+      ...repairContext.originalTask,
+      support_context: 'scaffolded',
+      repair_context: { ...repairContext, stage: 'retry_original' },
+    }, {
+      teacherMove: 'feedback',
+      checkpoint: repairContext.originalTask.prompt,
+      knowledgePoint: repairContext.originalTask.knowledgePoint || point,
+    });
+  }
   const keySource = `${kind}:${point}:${prompt}`.toLowerCase().replace(/\s+/g, '-');
   const requestedSupport = normalizeStudentTaskValue(
     source.support_context || source.supportContext,
@@ -379,6 +394,7 @@ export function normalizeStudentTask(raw, {
     ? 'scaffolded'
     : 'independent';
   const quickReplies = normalizeQuickReplies(source.quick_replies || source.quickReplies);
+  const cadenceRole = normalizeStudentTaskValue(source.cadence_role || source.cadenceRole, 32);
   const hints = Array.isArray(source.hints)
     ? source.hints.map(item => String(item || '').trim().slice(0, 240)).filter(Boolean).slice(0, 3)
     : [];
@@ -392,6 +408,7 @@ export function normalizeStudentTask(raw, {
     supportContext,
     assessment,
     repairContext,
+    cadenceRole,
     quickReplies,
     hints,
     key: keySource.slice(0, 220),
@@ -411,19 +428,26 @@ export function studentTaskAllowsDiagnosisEvidence(task) {
 export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, pendingStudentTask = null) {
   const turnType = classifyStudentTurn(studentMessage, { pendingStudentTask });
   const currentPhase = brief.lessonStep?.phase || brief.phase || 'explain';
+  const inExplicitExplainPhase = brief.lessonStep?.phase === 'explain' || brief.phase === 'explain';
   const checkGateSuccess = currentPhase === 'check'
     && turnType === 'attempt'
     && Number(raw?.student_state_update?.mastery_delta ?? raw?.student_state_update?.delta) > 0
     && raw?.student_state_update?.support_level !== 'prompted'
     && raw?.student_state_update?.independent !== false;
+  const successfulAttempt = turnType === 'attempt'
+    && Number(raw?.student_state_update?.mastery_delta ?? raw?.student_state_update?.delta) > 0
+    && raw?.student_state_update?.support_level !== 'prompted'
+    && raw?.student_state_update?.independent !== false;
+  const suspendPendingTask = pendingStudentTask?.kind && pendingStudentTask.kind !== 'none'
+    && ['stuck', 'question'].includes(turnType);
   const preservePendingTask = pendingStudentTask?.kind && pendingStudentTask.kind !== 'none'
-    && ['stuck', 'self_report', 'question', 'answer_seeking', 'regulation_request'].includes(turnType);
+    && ['self_report', 'answer_seeking', 'regulation_request'].includes(turnType);
   const policy = {
     summary_request: { moves: ['summary'], move: 'summary', state: 'summary', intent: '根据真实证据完成课堂小结', checkpoint: '查看复习安排与下节重点' },
     submitted_work: { moves: ['feedback'], move: 'feedback', state: 'feedback', intent: '根据作品讲清原理', checkpoint: '完成一道只改变一个条件的变式题' },
     stuck: { moves: ['explain', 'model'], move: 'explain', state: 'explain', intent: '用更小的例子重新讲解', checkpoint: '完成示例后的一个小检查' },
     self_report: { moves: ['question', 'practice'], move: 'question', state: 'check', intent: '用实际任务确认理解', checkpoint: '完成一道一分钟微任务' },
-    question: { moves: ['explain'], move: 'explain', state: 'explain', intent: '先回答问题再检查理解', checkpoint: '回答讲解后的一个小问题' },
+    question: { moves: ['explain'], move: 'explain', state: 'explain', intent: '完整回答学生的概念追问', checkpoint: '先听老师把这个问题讲清' },
     uncertain_attempt: { moves: ['clarify', 'question'], move: 'clarify', state: 'check', intent: '把猜测变成可验证的思路', checkpoint: '只完成一个更小的检查步骤' },
     answer_seeking: { moves: ['hint', 'model'], move: 'hint', state: 'practice', intent: '保留关键一步让学生完成', checkpoint: '完成老师保留的一个关键步骤' },
     regulation_request: { moves: ['clarify', 'explain'], move: 'clarify', state: currentPhase, intent: '根据学生请求调整课堂节奏', checkpoint: '按调整后的方式完成一个小任务' },
@@ -469,13 +493,30 @@ export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, p
     result.learning_diagnosis = null;
   }
   result.state = policy.state;
-  result.student_task = normalizeStudentTask(checkGateSuccess ? { kind: 'none' } : result.student_task, {
+  result.student_task = normalizeStudentTask(successfulAttempt ? { kind: 'none' } : result.student_task, {
     teacherMove: result.teacher_move,
     checkpoint: result.checkpoint,
     knowledgePoint: brief.focus || brief.lessonStep?.goal || brief.subjectName || '',
   });
+  if (inExplicitExplainPhase || suspendPendingTask) {
+    result.student_task = normalizeStudentTask({ kind: 'none' }, {
+      teacherMove: result.teacher_move,
+      checkpoint: result.checkpoint,
+      knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
+    });
+    if (inExplicitExplainPhase) {
+      result.checkpoint = turnType === 'question'
+        ? '先听老师把这个问题讲清'
+        : '继续本知识块的讲解';
+    }
+  }
   if (result.student_task.kind !== 'none') {
     result.student_task.quickReplies = normalizeQuickReplies(result.quick_replies);
+  }
+  if (['explain', 'model'].includes(result.teacher_move)) {
+    const instruction = validateInstructionBlock(result.instruction_block || result.instructionBlock || {});
+    result.instruction_contract = instruction;
+    if (!instruction.valid) result.student_state_update = null;
   }
   if (preservePendingTask) {
     result.student_task = normalizeStudentTask(pendingStudentTask, {
@@ -485,6 +526,10 @@ export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, p
     });
     result.checkpoint = result.student_task.prompt;
     result.task_preserved = true;
+  }
+  if (suspendPendingTask) {
+    result.checkpoint = policy.checkpoint;
+    result.task_suspended = true;
   }
   const executableAction = /写|选|选择|算|求出|改|运行|回答|回复|给出|提交|判断|找出|完成|比较|说(?:出)?|指出|标出|填|补|查看|确认|观察|列出|化简/u;
   if (result.student_task.kind !== 'none'
@@ -505,6 +550,13 @@ export function normalizeQuickReplies(raw) {
     if (replies.length === 4) break;
   }
   return replies.length >= 2 ? replies : [];
+}
+
+export function isConcreteStudentTaskPrompt(value) {
+  const prompt = String(value || '').trim();
+  if (prompt.length < 8) return false;
+  return !/^(?:请)?(?:独立)?(?:完成|回答|作答|解决|尝试)(?:这|一)?道?(?:新的?)?(?:同构|变式|检查|练习|复查)?题?[。.!！]?$/u.test(prompt)
+    && !/^(?:完成|回答|作答)(?:当前|下面|这道)(?:任务|问题|练习|检查题)[。.!！]?$/u.test(prompt);
 }
 
 function parseDetail(event) {
@@ -1091,6 +1143,12 @@ export function enforceTeacherVisibleMessage(value, structured = null) {
       visible = sentences.join('').trim();
     }
   }
+  if (structured?.task_suspended) {
+    visible = (visible.match(/[^。！？!?\n]+[。！？!?]?/gu) || [visible])
+      .filter(sentence => !/[?？]/u.test(sentence))
+      .join('')
+      .trim();
+  }
   if (structured?.task_preserved && structured?.student_task?.prompt) {
     const prompt = structured.student_task.prompt;
     const sentences = visible.match(/[^。！？!?\n]+[。！？!?]?/gu) || [visible];
@@ -1291,13 +1349,12 @@ export function updateLessonProgress(plan, progress = {}, {
   let status = progress.status || 'active';
   let instructionDelivered = progress.instructionDelivered === true;
   if (current.phase === 'explain') {
-    if (positiveEvidence && independentEvidence) {
+    if (teachingEvidence && ['explain', 'model'].includes(teacherMove)) {
       nextStep = Math.min(currentStep + 1, steps.length - 1);
       nextAttempts = 0;
       status = 'active';
-      instructionDelivered = false;
+      instructionDelivered = true;
     } else {
-      if (teachingEvidence && ['explain', 'model'].includes(teacherMove)) instructionDelivered = true;
       if (negativeEvidence || studentTurnType === 'stuck') {
         nextAttempts += 1;
         if (nextAttempts >= 2) status = 'remediate';
@@ -1485,7 +1542,7 @@ export function planTeacherContinuation({
     command = `${evidenceBlock}
 可信证据已经使课时进入总结阶段。请立即主动完成课堂收尾，不要再出新题，也不要等待学生点击小结。必须填写 lesson_summary，并且只依据真实对话、练习和小测证据，明确已证明、待巩固、无证据待确认、复习任务和下节唯一重点。
 lesson_summary 必须严格使用：{"lesson_title":"课时名称","mastered":[{"knowledge_point":"知识点","evidence":"学生具体独立正确证据"}],"needs_work":[{"knowledge_point":"待巩固点","evidence":"具体错误或提示依赖证据","next_action":"下一次补救动作"}],"not_yet_verified":[{"knowledge_point":"尚未检查点","next_check":"如何检查"}],"misconceptions":[{"pattern":"重复错因","evidence":"本节具体表现"}],"review":{"focus":"复习点","interval_days":1,"task":"一个可执行任务"},"next_lesson_focus":"唯一重点"}。没有证据的目标只能放入 not_yet_verified，禁止写成 mastered 或 needs_work。`;
-  } else if (source === 'quiz' && evidence?.correct === true && nextStepIndex !== previousStep) {
+  } else if (evidence?.correct === true && nextStepIndex !== previousStep) {
     kind = 'advance_lesson';
     command = `${evidenceBlock}
 先用一句具体反馈引用本次正确证据，然后主动开始当前教案的新步骤“${continuationValue(nextStep?.goal)}”。本节下一项证据要求是“${continuationValue(masterySnapshot.nextRequirement)}”。只执行一个教学动作，并给学生一个明确、低负担的下一步；不得把同构练习正确直接说成已经稳定掌握。`;
@@ -1568,6 +1625,10 @@ export function enforceTeacherContinuationPolicy(raw, kind = '', brief = {}, pen
       moves: ['question', 'practice'], move: 'question', state: 'check',
       intent: '撤掉提示检查独立完成', checkpoint: '完成一道不带提示的同构题',
     },
+    instructional_recheck: {
+      moves: ['question', 'practice'], move: 'question', state: 'check',
+      intent: '在完整讲解后用新题检查迁移', checkpoint: '独立完成这道新同构题',
+    },
     mastery_recheck: {
       moves: ['question', 'practice'], move: 'question', state: 'check',
       intent: '补充一条可验证的独立证据', checkpoint: '完成一道新的无提示短题',
@@ -1583,7 +1644,8 @@ export function enforceTeacherContinuationPolicy(raw, kind = '', brief = {}, pen
     resume_after_review: lessonPhasePolicy,
     advance_lesson: lessonPhasePolicy,
   };
-  const policy = policies[kind];
+  const effectiveKind = kind === 'instructional_recheck_retry' ? 'instructional_recheck' : kind;
+  const policy = policies[effectiveKind];
   if (!policy) return raw && typeof raw === 'object' ? { ...raw } : raw;
   const result = raw && typeof raw === 'object' ? { ...raw } : {
     message: '', visual: null, actions: [], quick_replies: [], lesson_summary: null,
@@ -1599,16 +1661,44 @@ export function enforceTeacherContinuationPolicy(raw, kind = '', brief = {}, pen
   result.student_state_update = null;
   result.learning_diagnosis = null;
   if (kind === 'review_warmup') result.actions = [];
-  const forcedTask = kind === 'lesson_summary'
+  const missingInstructionalTask = effectiveKind === 'instructional_recheck'
+    && !isConcreteStudentTaskPrompt(result.student_task?.prompt);
+  const forcedTask = kind === 'lesson_summary' || missingInstructionalTask
     ? { kind: 'none' }
-    : ['independent_recheck', 'mastery_recheck', 'review_warmup'].includes(kind)
-      ? { ...(result.student_task || {}), kind: 'knowledge_check' }
+    : ['instructional_recheck', 'independent_recheck', 'mastery_recheck', 'review_warmup'].includes(effectiveKind)
+      ? {
+        ...(result.student_task || {}),
+        kind: 'knowledge_check',
+        knowledge_point: brief.focus || brief.lessonStep?.goal || '',
+        cadence_role: ['instructional_recheck', 'independent_recheck', 'mastery_recheck'].includes(effectiveKind)
+          ? 'transfer_check'
+          : 'lesson_check',
+        quick_replies: result.student_task?.quick_replies,
+      }
       : result.student_task;
   result.student_task = normalizeStudentTask(forcedTask, {
     teacherMove: result.teacher_move,
     checkpoint: result.checkpoint,
     knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
   });
+  if (['explain', 'model'].includes(brief.lessonStep?.phase || brief.phase)
+    && !['review_warmup', 'instructional_recheck', 'instructional_recheck_retry'].includes(kind)) {
+    result.student_task = normalizeStudentTask({ kind: 'none' }, {
+      teacherMove: result.teacher_move,
+      checkpoint: result.checkpoint,
+      knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
+    });
+  }
+  if (effectiveKind === 'instructional_recheck' && result.student_task.kind !== 'none') {
+    const quickReplies = normalizeQuickReplies([
+      ...(result.student_task.quickReplies || []),
+      '稍后练习',
+    ]);
+    result.student_task.quickReplies = quickReplies.length
+      ? quickReplies
+      : ['稍后练习'];
+    result.quick_replies = result.student_task.quickReplies;
+  }
   return result;
 }
 
@@ -1650,18 +1740,18 @@ ${masteryGate ? `- 本节已证明标准：${verifiedCriteria.join('；') || '�
 【教学纪律】
 1. 收到学生回答后，先判断其思路和具体卡点，再回应；不要只判断对错。
 2. 一次只推进一个教学动作：讲一个点、问一个问题，或布置一个练习。
-3. 解释遵循“连接旧知 -> 小例子 -> 让学生说/做”的顺序，单次正文不超过 180 字。
+3. 讲解步骤必须在一个知识块内完成“连接旧知 -> 概念模型 -> 最小例子 -> 关键对比 -> 小结”。讲解和示范阶段 student_task 必须为 none，不得为满足协议而每轮出题；只有教案进入 practice 或 check 才要求学生作答。
 3.1 提问必须具体且低负担：一次一个问题，优先给选项、改错或一行作答；不要让学生同时说明场景、工具和学过的内容，也不要要求列举术语来证明基础。
 4. 学生尚未尝试时不直接给完整答案；学生已经提交答案或代码后，老师必须先明确判断并亲自讲清关键原理，不能把解释责任推回给学生。
-4.1 对正确答案，先用具体执行过程说明为什么正确，再用改变一个条件的短题检查迁移；禁止要求学生机械复述刚刚已经正确使用的语句。对错误答案，先指出具体证据，再按提示层级辅导。
+4.1 对正确答案，先用具体执行过程说明为什么正确并提炼规则，student_task 设为 none，由客户端根据教案决定进入讲授、练习、检查或总结；禁止在反馈正文里自行追加同构题。对错误答案，老师直接指出具体差异、完成讲解并公布正确答案，不要求学生把原题修到正确。
 4.2 学科准确性优先于顺口的比喻。涉及等价变形、守恒或条件变化时，必须说清“不变量”和实际操作；例如方程移项应表述为等式两边做相同运算，并用与原项相反的运算消去它，不得说成“两边做相反运算”。
 5. 表扬必须指出具体行为，不要使用空泛的“你真棒”“太厉害了”。错误反馈使用“做对的部分 -> 卡点 -> 下一步”。
-5.1 答错后按证据选择补救方式：概念混淆就做对比解释；步骤遗漏只补缺失步骤；运行或语法错误先定位具体行；粗心错误要求学生自行检查；连续失败则退回一个前置知识点。不得只公布正确答案后继续。
+5.1 答错后按证据选择补救方式：概念混淆就做对比解释；步骤遗漏就补全缺失步骤；运行或语法错误先定位具体行；粗心错误由老师直接指出差异；连续失败则退回一个前置知识点。老师必须完成纠正和讲解，不得要求学生自行找错或修改到正确，也不得只公布答案后继续。
 5.2 不得把所有错误都叫作“概念不懂”。同类错误第二次出现时必须缩小任务并换一种表示方式；第三次出现时先检查必要的前置知识，禁止重复上一轮讲解。
 6. 不使用大哥哥/大姐姐口吻，不卖萌，不假装了解学生没有表达过的情况。
 6.1 教学偏好只代表学生明确提出的当前节奏或表示方式，不得推断为人格、智力、能力上限或固定“学习风格”。有效讲法必须有独立成功证据；只有提示后成功时仍需安排无提示复查。
 6.2 一次正确最多通过当前一个证据门槛。同构练习正确只能进入变式检查；只有新的无提示变式证据才能写成已证明。不得把旧答案、重复提交或无关知识点用于推进。
-7. 每隔 3 至 5 轮做一次两句以内的小结，并明确下一步。
+7. 每个知识块讲授结束时做两句以内的小结。练习和检查必须由教案步骤触发，禁止连续生成只改数字或变量名的同构题链。
 8. 每轮必须选择且只选择一个 teacher_move：diagnose、clarify、explain、model、question、hint、practice、feedback、summary。
 8.1 每轮还必须填写 teaching_strategy，记录本轮真正采用的主要教法，只能使用：direct_explanation、worked_example、guided_question、scaffolded_hint、hands_on_practice、specific_feedback、diagnostic_question、contrast_cases、worked_step、syntax_focus、state_trace、self_check、prerequisite_step、fade_hint、discriminate、alternate_representation、prerequisite_probe、independent_recheck。
 9. intent 用学生能理解的话说明本轮为什么这样教；checkpoint 明确学生接下来要说、写、算或运行什么。
@@ -1681,6 +1771,8 @@ evidence_quote 必须逐字出现在学生本轮消息中；只能证明结果�
 
 需要学生动手写 Python 时，在 actions 中使用 open_practice_panel。practice 必须包含 prompt、starter_code、knowledge_point、hints（由方向到关键步骤，最多 3 条），可以包含 test_code、expected_output、validation_rule 和 completions。completions 只提供本题变量名、函数名或语法片段，不得包含完整答案。
 
+讲授 Java 的执行顺序、对象引用、条件分支、循环或类定义等适合真实运行观察的概念时，优先填写 coding_lab，让学生亲手修改并运行，而不是继续用口头猜输出代替实践。格式为 {"id":"稳定实验标识","language":"java","title":"实验名称","goal":"本次唯一观察目标","initial_code":"包含 public class Main 与 main 方法的最小可运行源码","observations":["运行前观察点","运行后对比点"],"task_key":"仅在实验就是当前 student_task 时填写其 key"}。源码不得使用 package、文件、网络、进程、反射、System.exit 或第三方依赖，不得提供命令行参数。coding_lab 可以用于无评分探索；仅在 student_task 为 practice 且要求提交实验时绑定 task_key。
+
 需要进行一分钟理解检查时，在 actions 中使用 show_quiz。quiz 必须包含 type、question、answer、knowledge_point、difficulty、hint 和 explanation；选择题还必须包含 options。hint 只指出观察方向，不能泄露答案；explanation 用于学生两次作答仍错误后讲清原因。
 
 概念适合图示时填写 visual，格式为 {"type":"steps|comparison|concept","title":"图示标题","items":["简短条目"]}，最多 8 项。只有图示能明显帮助理解时才使用，不添加装饰内容。
@@ -1697,7 +1789,7 @@ student_task 格式：{"kind":"knowledge_check|practice|diagnostic_check|learnin
 当学生明确请求批改作业且消息给出了作业 ID 时，先依据要求和学生答案给出具体反馈，再填写 homework_update：{"homework_id":数字,"status":"graded","grade":"简短等级或分数 + 具体反馈"}。没有明确请求时不得填写。
 
 必须只返回一个 JSON 对象，不要代码围栏、前后说明或内部推理：
-{"state":"explain|check|practice|quiz|feedback|summary","message":"给学生看的正文","teacher_move":"diagnose|clarify|explain|model|question|hint|practice|feedback|summary","teaching_strategy":"本轮主要教法","intent":"本轮教学目的","checkpoint":"学生下一步具体动作","student_task":{"kind":"knowledge_check","prompt":"唯一待答任务","expected_response":"明确格式","knowledge_point":"知识点","hints":["不泄露答案的第一步提示","更具体的结构提示"],"assessment":{"reference_answer":"隐藏参考答案","criteria":["评分要点"],"acceptable_alternatives":[],"grading_mode":"equivalent"}},"quick_replies":["学生可直接点击的短答案1","短答案2"],"visual":null,"board_update":{"mode":"keep","title":"","items":[]},"actions":[],"student_state_update":null,"learning_diagnosis":null,"lesson_summary":null}`;
+{"state":"explain|check|practice|quiz|feedback|summary","message":"给学生看的正文","teacher_move":"diagnose|clarify|explain|model|question|hint|practice|feedback|summary","teaching_strategy":"本轮主要教法","intent":"本轮教学目的","checkpoint":"学生下一步具体动作","instruction_block":{"prior_connection":"与旧知的具体连接","mental_model":"可操作的心智模型","worked_example":"完整示例","subgoals":["子目标1","子目标2"],"contrast_or_boundary":"关键对比或边界","summary":"本知识块小结"},"student_task":{"kind":"knowledge_check","prompt":"唯一待答任务","expected_response":"明确格式","knowledge_point":"知识点","hints":["不泄露答案的第一步提示","更具体的结构提示"],"assessment":{"reference_answer":"隐藏参考答案","criteria":["评分要点"],"acceptable_alternatives":[],"grading_mode":"equivalent"}},"quick_replies":["学生可直接点击的短答案1","短答案2"],"visual":null,"board_update":{"mode":"keep","title":"","items":[]},"coding_lab":null,"actions":[],"student_state_update":null,"learning_diagnosis":null,"lesson_summary":null}`;
 }
 
 export function classifyStudentTurn(value, { pendingStudentTask = null } = {}) {
@@ -1816,31 +1908,25 @@ ${brief.teachingMemory?.avoidStrategies?.length ? `本轮禁止原样重复：${
 3. student_state_update 与 learning_diagnosis 都必须为 null。`,
     attempt: `本轮必须执行 feedback 或 clarify：
 1. 先引用学生作答中的具体证据，说明做对了什么或卡点在哪里。
-2. 若有错误，只处理最关键的一处并给可执行的下一步；若正确，用一个变式检查迁移。
+2. 若有错误，这是教学时刻：直接指出差异、完整演示正确过程并公布正确答案，不要求学生重答原题；若正确，用一个变式检查迁移。
 3. 不使用空泛鼓励，不重复学生原话凑篇幅。
-4. 作答错误时必须填写 learning_diagnosis，evidence_quote 逐字引用本轮作答；只能看出结果错误时使用 unknown。作答正确时必须为 null。`,
+4. 作答错误时 student_task.kind 必须为 none，客户端会另出新同构题；同时填写 learning_diagnosis，evidence_quote 逐字引用本轮作答。作答正确时 learning_diagnosis 必须为 null。`,
   };
   if (turnType === 'attempt' && brief.lessonStep?.phase === 'check') {
     contracts.attempt = `本轮正在处理本节最后一道独立迁移检查：
 1. 先引用学生本轮作答中的具体步骤或结果，明确判断正确或错误。
 2. 若正确，只讲清为什么正确，不再出另一道题；checkpoint 写“查看老师根据本次证据完成的课堂总结”，student_task.kind 必须为 none。客户端会验证证据并自动收尾。
-3. 若错误，只处理最关键的一处并给一个更小检查；必须填写有逐字证据的 learning_diagnosis。
+3. 若错误，直接完整讲清并公布正确答案，student_task.kind 设为 none；客户端会另出新同构题。必须填写有逐字证据的 learning_diagnosis。
 4. 一次只执行一个教学动作，不提前编写课堂总结。`;
   }
 
-  const repairContract = repairContext?.stage === 'repair_step'
-    ? `本轮只处理局部修正：
-1. 根据客户端独立判卷确认学生是否修正当前第一处错误，不把局部修正计为掌握。
-2. 若修正正确，只确认这一处并回到原任务“${repairContext.originalTask?.prompt || ''}”；不得另出新题。
-3. 若仍错误，只处理新的第一处错误并保持原任务不变。
+  const repairContract = repairContext
+    ? `旧纠错任务需要迁移到教师直接讲解：
+1. 不再要求学生继续修正或重答原题“${repairContext.originalTask?.prompt || ''}”。
+2. 根据客户端判卷直接讲清错误、完整过程和正确答案。
+3. student_task.kind 必须为 none，客户端随后安排新同构题。
 4. student_state_update 必须为 null。`
-    : repairContext?.stage === 'retry_original'
-      ? `本轮是学生在明确提示后重新完成原任务：
-1. 根据客户端独立判卷反馈完整作答，不把正确说成独立掌握。
-2. 若正确，不再布置新题；客户端会主动安排无提示同构复查。
-3. 若仍错误，只处理新的第一处错误并保持原任务不变。
-4. 正向证据必须标记为 prompted。`
-      : '';
+    : '';
   const summaryContract = repairContract || (brief.lessonStep?.phase === 'summary'
     ? contracts.summary_request
     : brief.reviewWarmup
