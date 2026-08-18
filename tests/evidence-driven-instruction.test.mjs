@@ -3,11 +3,25 @@ import assert from 'node:assert/strict';
 import {
   decideInstructionalAction,
   deriveEvidenceStage,
+  deriveTaskEvidenceStage,
   normalizeCanonicalKnowledgeComponent,
   normalizeEvidenceRecords,
   projectMasteryFromEvidence,
   validateInstructionBlock,
 } from '../frontend/evidence-driven-instruction.js';
+
+test('an explicit independent transfer task outranks the current lesson phase', () => {
+  assert.equal(deriveTaskEvidenceStage({
+    studentUpdate: { delta: 0.12, supportLevel: 'independent' },
+    task: { supportContext: 'independent', cadenceRole: 'transfer_check' },
+    lessonPhase: 'explain',
+  }), 'transferred');
+  assert.equal(deriveTaskEvidenceStage({
+    studentUpdate: { delta: 0.04, supportLevel: 'prompted' },
+    task: { supportContext: 'independent', cadenceRole: 'transfer_check' },
+    lessonPhase: 'check',
+  }), 'guided');
+});
 
 const base = { subject_id: 'java', canonical_key: 'java.increment', source: 'independent_verifier', task_key: 'task-1', created_at: '2026-07-20T08:00:00Z', trusted: true };
 

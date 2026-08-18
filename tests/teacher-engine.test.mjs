@@ -421,6 +421,47 @@ test('client support policy does not let a scaffolded correction masquerade as i
   assert.equal(modeledAnswer.supportLevel, 'prompted');
 });
 
+test('an explicit independent transfer check resolves stale intervention support', () => {
+  const update = {
+    knowledgePoint: '指定区间累加', evidence: '学生独立提交完整正确代码',
+    confidence: 0.95, before: 0.4, delta: 0.12, mastery: 0.52, supportLevel: 'independent',
+  };
+  const result = enforceStudentEvidenceSupport(update, {
+    activeIntervention: { status: 'active', knowledgePoint: '指定区间累加' },
+    previousTeacherMove: 'feedback',
+    pendingStudentTask: {
+      kind: 'practice', supportContext: 'independent', cadenceRole: 'transfer_check',
+    },
+  });
+  assert.equal(result.supportLevel, 'independent');
+  assert.equal(result.delta, 0.12);
+});
+
+test('an explicit transfer task closes immediately even outside the lesson check phase', () => {
+  const result = enforceTeacherTurnPolicy({
+    state: 'feedback',
+    message: '代码正确，最终输出 22。',
+    teacher_move: 'feedback',
+    intent: '反馈代码',
+    checkpoint: '再做一道题',
+    student_state_update: {
+      knowledge_point: '指定区间累加', mastery_delta: 0.12, confidence: 0.96,
+      evidence: '学生独立提交从 4 到 7 的正确代码', support_level: 'independent',
+    },
+    student_task: { kind: 'practice', prompt: '再写一道类似代码' },
+  }, 'int sum = 0; for (int i = 4; i <= 7; i++) sum += i;', {
+    phase: 'practice', focus: '指定区间累加',
+    lessonStep: { phase: 'practice', goal: '完成引导练习' },
+  }, {
+    kind: 'practice', prompt: '把 4 到 7 累加', knowledgePoint: '指定区间累加',
+    supportContext: 'independent', cadenceRole: 'transfer_check',
+  });
+  assert.equal(result.instructional_decision.action, 'advance');
+  assert.equal(result.student_task.kind, 'none');
+  assert.equal(result.can_advance, true);
+  assert.equal(result.actions.some(action => action.type === 'advance'), true);
+});
+
 test('active intervention controls the teacher brief instead of a generic reteach label', () => {
   const intervention = normalizeLearningDiagnosis({
     category: 'execution_error', knowledge_point: '变量更新',
@@ -965,6 +1006,124 @@ test('client policy prevents the teacher from pushing explanation back to the st
   assert.equal(summaryTurn.state, 'summary');
 });
 
+test('client policy rejects a lesson summary before the evidence gate reaches summary', () => {
+  const brief = buildTeacherBrief({
+    subjectName: 'Java基础编程',
+    assessed: true,
+    lessonPlan: normalizeLessonPlan({
+      title: '循环累加',
+      focus: 'for 循环累加',
+      objective: '独立完成指定区间累加',
+      success_criteria: ['完成引导练习', '完成迁移检查'],
+      steps: [
+        { id: 'explain', phase: 'explain', goal: '讲清循环执行顺序', evidence: '能跟随执行轨迹' },
+        { id: 'practice', phase: 'practice', goal: '完成练习', evidence: '提交正确代码', criterion_ids: ['criterion-1'] },
+        { id: 'check', phase: 'check', goal: '完成迁移', evidence: '独立提交变式', criterion_ids: ['criterion-2'] },
+        { id: 'summary', phase: 'summary', goal: '总结', evidence: '形成总结' },
+      ],
+      remediation: { trigger: '连续错误', action: '缩小例子' },
+    }),
+    lessonProgress: { currentStep: 0, status: 'active', gateVersion: 1, evidenceLedger: { records: [] } },
+  });
+  const result = enforceTeacherTurnPolicy({
+    state: 'summary',
+    message: '本节目标已完成，无需继续作答。',
+    teacher_move: 'summary',
+    intent: '完成本节',
+    checkpoint: '进入下一节',
+    instruction_block: {
+      prior_connection: '你已经见过循环变量。',
+      mental_model: '每轮先判断条件，再执行循环体，最后更新变量。',
+      worked_example: 'i 从 1 到 3 时，sum 依次为 1、3、6。',
+      subgoals: ['初始化', '判断边界'],
+      contrast_or_boundary: '退出时的 i 不会再参与累加。',
+      summary: '循环变量控制轮次，sum 保存累计结果。',
+    },
+    student_task: { kind: 'none' },
+    lesson_summary: { lesson_title: '循环累加', mastered: [] },
+    actions: [{ type: 'advance', label: '进入下一节' }],
+  }, '继续', brief, null);
+  assert.equal(result.completion_claim_rejected, true);
+  assert.equal(result.teacher_move, 'explain');
+  assert.equal(result.lesson_summary, null);
+  assert.equal(result.student_task.kind, 'none');
+  assert.doesNotMatch(result.message, /本节目标已完成/);
+  assert.equal(result.actions.some(action => action.type === 'advance'), false);
+});
+
+test('manual lesson continuation uses the same summary evidence gate', () => {
+  const brief = {
+    phase: 'explain',
+    focus: 'for 循环累加',
+    lessonStep: { id: 'explain', phase: 'explain', goal: '讲清循环执行顺序', evidence: '能跟随执行轨迹' },
+    masteryGate: { nextRequirement: '先完成讲解与示范' },
+  };
+  const result = enforceTeacherContinuationPolicy({
+    state: 'summary',
+    message: '本节目标已完成，无需继续作答。',
+    teacher_move: 'summary',
+    intent: '结束本节',
+    checkpoint: '无需作答',
+    instruction_block: {
+      prior_connection: '你已经见过循环变量。',
+      mental_model: '每轮先判断，再执行，最后更新。',
+      worked_example: 'i 从 1 到 3 时，sum 依次为 1、3、6。',
+      subgoals: ['初始化', '判断边界'],
+      contrast_or_boundary: '退出值不再参与累加。',
+      summary: 'i 控制轮次，sum 保存总和。',
+    },
+    student_task: { kind: 'none' },
+    lesson_summary: { lesson_title: '循环累加' },
+  }, '', brief, null);
+  assert.equal(result.completion_claim_rejected, true);
+  assert.equal(result.teacher_move, 'explain');
+  assert.equal(result.lesson_summary, null);
+  assert.doesNotMatch(result.message, /本节目标已完成/);
+});
+
+test('manual continuation cannot downgrade a lesson check to diagnosis', () => {
+  const result = enforceTeacherContinuationPolicy({
+    state: 'check',
+    message: '我没有看到代码，请重新粘贴。',
+    teacher_move: 'diagnose',
+    intent: '补全信息',
+    checkpoint: '重新粘贴代码',
+    student_task: { kind: 'diagnostic_check', prompt: '粘贴完整代码' },
+  }, '', {
+    phase: 'check',
+    focus: '指定起点和终点的 for 循环累加',
+    lessonStep: { phase: 'check', goal: '独立完成只把起点从 3 改为 4 的迁移题' },
+    masteryGate: { nextRequirement: '独立完成一道变式迁移' },
+  }, null);
+  assert.equal(result.teacher_move, 'question');
+  assert.equal(result.student_task.kind, 'knowledge_check');
+  assert.equal(result.student_task.supportContext, 'independent');
+  assert.equal(result.student_task.cadenceRole, 'transfer_check');
+  assert.doesNotMatch(result.message, /没有看到|重新粘贴/);
+});
+
+test('premature summary text is replaced even when its instruction block is incomplete', () => {
+  const result = enforceTeacherContinuationPolicy({
+    state: 'summary',
+    message: '本节目标已达成，课堂结束。',
+    teacher_move: 'summary',
+    intent: '结束本节',
+    checkpoint: '无需作答',
+    instruction_block: { summary: '只提供了总结。' },
+    student_task: { kind: 'none' },
+  }, '', {
+    phase: 'practice',
+    focus: '循环累加',
+    lessonStep: { phase: 'practice', goal: '完成指定区间累加练习', evidence: '提交可运行代码' },
+    masteryGate: { nextRequirement: '独立完成当前练习' },
+  }, null);
+  assert.equal(result.completion_claim_rejected, true);
+  assert.match(result.message, /当前课时还没有进入总结阶段/);
+  assert.doesNotMatch(result.message, /本节目标已达成|课堂结束/);
+  assert.equal(result.student_task.kind, 'practice');
+  assert.match(result.student_task.prompt, /指定区间累加练习/);
+});
+
 test('a correct practice answer closes the current task before the lesson advances', () => {
   const guarded = enforceTeacherTurnPolicy({
     teacher_move: 'feedback', intent: '确认答案', checkpoint: '再做一道同构题',
@@ -1455,4 +1614,61 @@ test('student concept questions suspend the pending task and remove follow-up qu
   assert.match(visible, /sum 会保存上一轮结果/);
   assert.doesNotMatch(visible, /数组长度是多少/);
   assert.doesNotMatch(visible, /继续作答|当前任务/);
+});
+
+test('first verified error closes the original task and makes the teacher reveal the correction', () => {
+  const pending = normalizeStudentTask({
+    kind: 'knowledge_check', prompt: '执行 i++ 后 i 是多少？',
+    expected_response: '一个整数', knowledge_point: '后置自增',
+  });
+  const guarded = enforceTeacherTurnPolicy({
+    teacher_move: 'question', intent: '要求重做', checkpoint: '再做一次原题',
+    message: '答案不对，请重做。',
+    student_state_update: {
+      knowledge_point: '后置自增', mastery_delta: -0.08,
+      support_level: 'independent', evidence: '学生回答 2，标准答案为 3',
+    },
+    student_task: pending,
+  }, '2', { focus: '后置自增', phase: 'check' }, pending);
+
+  assert.equal(guarded.instructional_decision.action, 'correct_and_explain');
+  assert.equal(guarded.teacher_move, 'feedback');
+  assert.equal(guarded.student_task.kind, 'none');
+  assert.equal(guarded.answer_revealed, true);
+  assert.match(guarded.checkpoint, /讲清正确答案/);
+});
+
+test('prompted success permits only one fresh independent recheck', () => {
+  const guarded = enforceTeacherTurnPolicy({
+    teacher_move: 'question', intent: '撤掉提示检查', checkpoint: '判断新的表达式结果',
+    student_state_update: {
+      knowledge_point: '前置与后置自增', mastery_delta: 0.03,
+      support_level: 'prompted', evidence: '学生在提示后完成',
+    },
+    student_task: {
+      kind: 'knowledge_check', prompt: '判断 int i=2; int r=++i; 的结果',
+      expected_response: 'i=数字，r=数字', knowledge_point: '前置与后置自增',
+    },
+  }, 'i=3，r=3', { focus: '前置与后置自增', phase: 'practice' });
+
+  assert.equal(guarded.instructional_decision.action, 'independent_recheck');
+  assert.equal(guarded.student_task.supportContext, 'independent');
+  assert.equal(guarded.student_task.cadenceRole, 'transfer_check');
+  assert.equal(guarded.max_immediate_rechecks, 1);
+});
+
+test('explicit next lesson intent closes the current task and schedules the gap for review', () => {
+  const pending = normalizeStudentTask({
+    kind: 'knowledge_check', prompt: '再判断一道相近题', knowledge_point: '循环累加',
+  });
+  const guarded = enforceTeacherTurnPolicy({
+    teacher_move: 'question', intent: '继续复查', checkpoint: pending.prompt,
+    student_task: pending,
+  }, '这题先跳过，我想进入下一节', { focus: '循环累加', phase: 'check' }, pending);
+
+  assert.equal(guarded.instructional_decision.action, 'advance_and_schedule_review');
+  assert.equal(guarded.student_task.kind, 'none');
+  assert.equal(guarded.can_advance, true);
+  assert.equal(guarded.review_scheduled, true);
+  assert.ok(guarded.actions.some(action => action.type === 'advance'));
 });

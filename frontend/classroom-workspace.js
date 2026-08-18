@@ -332,3 +332,14 @@ export function restoreTaskDraft(raw, {
     || updatedAt > currentTime + 60_000 || currentTime - updatedAt > Number(maxAgeMs)) return '';
   return canonicalDraft(source.content);
 }
+
+export function shouldShowCourseResume(session = {}) {
+  const pendingTaskKind = boundedText(session?.pendingStudentTask?.kind, 40).toLowerCase();
+  const hasPendingTask = Boolean(pendingTaskKind && pendingTaskKind !== 'none');
+  const hasSuspendedTask = Boolean(session?.suspendedStudentTask?.kind
+    && session.suspendedStudentTask.kind !== 'none');
+  const hasDeferredTask = Boolean(session?.deferredRecheck?.task?.kind
+    && session.deferredRecheck.task.kind !== 'none');
+  const hasPendingTeachingAction = Boolean(session?.pendingTeacherContinuation?.kind);
+  return !(hasPendingTask || hasSuspendedTask || hasDeferredTask || hasPendingTeachingAction);
+}

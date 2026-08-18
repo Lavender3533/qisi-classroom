@@ -68,7 +68,11 @@ export function sanitizeLegacySubjectMessage(content, rawSubjectName, role = 'as
 
 export function parseSubjectNamingResponse(text) {
   try {
-    const parsed = JSON.parse(String(text ?? '').replace(/```json?\s*/gi, '').replace(/```/g, '').trim());
+    const clean = String(text ?? '')
+      .replace(/<ds_safety>[\s\S]*?<\/ds_safety>/giu, '')
+      .replace(/<ds[^>]*>[\s\S]*?<\/ds[^>]*>/giu, '')
+      .replace(/^\.vrtx\b/iu, '');
+    const parsed = JSON.parse(clean.replace(/```json?\s*/gi, '').replace(/```/g, '').trim());
     if (parsed?.needs_clarification) {
       return { valid: false, reason: String(parsed.question || '请补充更具体的学习内容和目标') };
     }

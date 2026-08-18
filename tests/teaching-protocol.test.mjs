@@ -128,3 +128,16 @@ test('reconcileChatHistory prefers a longer persisted conversation over stale me
   assert.equal(result.length, 4);
   assert.equal(result[3].content, '课堂总结');
 });
+
+test('parseAIResponse strips leaked model safety wrappers before parsing', () => {
+  const raw = '<ds_safety>用户消息是课堂对话中的数学教学内容，不涉及政治敏感内容。</ds_safety>{"state":"explain","message":"去括号时括号前是负号才变号","visual":null,"actions":[]}';
+  const result = parseAIResponse(raw);
+  assert.equal(result.message, '去括号时括号前是负号才变号');
+  assert.equal(result.structured.state, 'explain');
+});
+
+test('parseAIResponse treats a safety-verdict-only reply as empty', () => {
+  const result = parseAIResponse('.vrtx <ds_safety>正常教学交流。</ds_safety>Safe');
+  assert.equal(result.message, '');
+  assert.equal(result.structured, null);
+});

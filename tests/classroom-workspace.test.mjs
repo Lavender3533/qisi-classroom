@@ -14,6 +14,7 @@ import {
   normalizeTeachingBoardUpdate,
   restoreTaskDraft,
   serializeTaskDraft,
+  shouldShowCourseResume,
   shouldObserveStudentDraft,
 } from '../frontend/classroom-workspace.js';
 
@@ -220,4 +221,13 @@ test('task drafts restore only for the exact unexpired task', () => {
     taskKey: 'task-a', now: 1_000 + (8 * 24 * 60 * 60 * 1000),
   }), '');
   assert.equal(restoreTaskDraft('{not-json', { taskKey: 'task-a', now: 2_000 }), '');
+});
+
+test('course resume strip yields to a concrete task or pending teaching action', () => {
+  assert.equal(shouldShowCourseResume({}), true);
+  assert.equal(shouldShowCourseResume({ pendingStudentTask: { kind: 'none' } }), true);
+  assert.equal(shouldShowCourseResume({ pendingStudentTask: { kind: 'knowledge_check' } }), false);
+  assert.equal(shouldShowCourseResume({ suspendedStudentTask: { kind: 'practice' } }), false);
+  assert.equal(shouldShowCourseResume({ deferredRecheck: { task: { kind: 'knowledge_check' } } }), false);
+  assert.equal(shouldShowCourseResume({ pendingTeacherContinuation: { kind: 'advance_lesson' } }), false);
 });

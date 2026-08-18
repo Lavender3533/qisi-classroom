@@ -1,4 +1,4 @@
-import { validateInstructionBlock } from './evidence-driven-instruction.js';
+import { decideInstructionalAction, validateInstructionBlock } from './evidence-driven-instruction.js';
 
 const PHASE_META = {
   diagnose: { label: '了解学情', nextAction: '先问一个能看出思路的问题，再决定从哪里讲起' },
@@ -28,6 +28,8 @@ const DEFAULT_TEACHING_STRATEGY = Object.freeze({
   model: 'worked_example', question: 'guided_question', hint: 'scaffolded_hint',
   practice: 'hands_on_practice', feedback: 'specific_feedback', summary: 'specific_feedback',
 });
+
+const COMPLETION_CLAIM_RE = /(?:本节|本课|课堂).{0,6}(?:目标|内容|教学|学习).{0,6}(?:完成|达成|结束)|(?:本节|本课|课堂).{0,10}(?:已结束|收尾|总结|已完成|已达成)|(?:完成|达成).{0,8}(?:本节|本课)/u;
 
 export const STUDENT_TASK_KINDS = Object.freeze({
   knowledge_check: { label: '知识检查', evidenceScope: 'mastery' },
@@ -426,8 +428,35 @@ export function studentTaskAllowsDiagnosisEvidence(task) {
 }
 
 export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, pendingStudentTask = null) {
+  const hasStudentInput = String(studentMessage || '').trim().length > 0;
   const turnType = classifyStudentTurn(studentMessage, { pendingStudentTask });
   const currentPhase = brief.lessonStep?.phase || brief.phase || 'explain';
+  const rawDelta = Number(raw?.student_state_update?.mastery_delta ?? raw?.student_state_update?.delta);
+  const evidenceBearingTurn = ['attempt', 'submitted_work'].includes(turnType);
+  const hasVerdict = evidenceBearingTurn && Number.isFinite(rawDelta) && rawDelta !== 0;
+  const supportLevel = raw?.student_state_update?.support_level === 'prompted'
+    || raw?.student_state_update?.independent === false ? 'prompted' : 'none';
+  const explicitTransferTask = pendingStudentTask?.supportContext === 'independent'
+    && pendingStudentTask?.cadenceRole === 'transfer_check';
+  const positiveStage = supportLevel === 'prompted'
+    ? 'guided'
+    : currentPhase === 'check' || explicitTransferTask ? 'transferred' : 'independent';
+  const explicitAdvance = /(?:进入|开始|继续).{0,8}(?:下一|下节|新内容)|(?:下一|下节).{0,8}(?:课|内容)|跳过.{0,8}(?:检查|复查|这题)/u.test(String(studentMessage || ''));
+  const studentIntent = explicitAdvance
+    ? 'advance'
+    : turnType === 'question' ? 'concept_question' : '';
+  const difficultyCount = Math.max(
+    Number(raw?.learning_diagnosis?.level) || 0,
+    Number(brief?.intervention?.occurrences) || 0,
+    hasVerdict && rawDelta < 0 ? 1 : 0,
+  );
+  const instructionalDecision = decideInstructionalAction({
+    studentIntent,
+    stage: hasVerdict && rawDelta > 0 ? positiveStage : 'unknown',
+    supportLevel,
+    correct: hasVerdict ? rawDelta > 0 : null,
+    consecutiveDifficulty: difficultyCount,
+  });
   const inExplicitExplainPhase = brief.lessonStep?.phase === 'explain' || brief.phase === 'explain';
   const checkGateSuccess = currentPhase === 'check'
     && turnType === 'attempt'
@@ -472,7 +501,7 @@ export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, p
   const result = raw && typeof raw === 'object' ? { ...raw } : {
     message: '', visual: null, actions: [], quick_replies: [], student_state_update: null,
   };
-  if (!policy.moves.includes(String(result.teacher_move || ''))) result.teacher_move = policy.move;
+  if (hasStudentInput && !policy.moves.includes(String(result.teacher_move || ''))) result.teacher_move = policy.move;
   if (!String(result.intent || '').trim()) result.intent = policy.intent;
   if (!String(result.checkpoint || '').trim()) result.checkpoint = policy.checkpoint;
   if (checkGateSuccess) {
@@ -492,7 +521,7 @@ export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, p
   if (['self_report', 'question', 'uncertain_attempt', 'answer_seeking', 'regulation_request', 'learning_choice', 'readiness_response'].includes(turnType)) {
     result.learning_diagnosis = null;
   }
-  result.state = policy.state;
+  if (hasStudentInput || !String(result.state || '').trim()) result.state = policy.state;
   result.student_task = normalizeStudentTask(successfulAttempt ? { kind: 'none' } : result.student_task, {
     teacherMove: result.teacher_move,
     checkpoint: result.checkpoint,
@@ -513,10 +542,114 @@ export function enforceTeacherTurnPolicy(raw, studentMessage = '', brief = {}, p
   if (result.student_task.kind !== 'none') {
     result.student_task.quickReplies = normalizeQuickReplies(result.quick_replies);
   }
+  result.instructional_decision = instructionalDecision;
+  if (instructionalDecision.action === 'correct_and_explain') {
+    result.teacher_move = 'feedback';
+    result.state = 'feedback';
+    result.intent = '直接纠正第一处关键差异并讲清正确答案';
+    result.checkpoint = '先看老师讲清正确答案';
+    result.student_task = normalizeStudentTask({ kind: 'none' }, {
+      teacherMove: 'feedback', checkpoint: result.checkpoint, knowledgePoint: brief.focus || '',
+    });
+    result.answer_revealed = true;
+  } else if (['change_representation', 'check_prerequisite'].includes(instructionalDecision.action)) {
+    result.teacher_move = instructionalDecision.action === 'check_prerequisite' ? 'explain' : 'model';
+    result.state = 'explain';
+    result.intent = instructionalDecision.action === 'check_prerequisite'
+      ? '暂停当前难度并检查最小前置知识'
+      : '缩小任务并更换表示方式重新讲解';
+    result.student_task = normalizeStudentTask({ kind: 'none' }, {
+      teacherMove: result.teacher_move, checkpoint: result.checkpoint, knowledgePoint: brief.focus || '',
+    });
+  } else if (instructionalDecision.action === 'independent_recheck') {
+    result.student_task = normalizeStudentTask({
+      ...(result.student_task || {}),
+      kind: ['practice', 'knowledge_check'].includes(result.student_task?.kind)
+        ? result.student_task.kind : 'knowledge_check',
+      support_context: 'independent',
+      cadence_role: 'transfer_check',
+    }, {
+      teacherMove: result.teacher_move,
+      checkpoint: result.checkpoint,
+      knowledgePoint: brief.focus || '',
+    });
+    result.max_immediate_rechecks = 1;
+  } else if (['advance', 'advance_and_schedule_review'].includes(instructionalDecision.action)) {
+    result.teacher_move = hasVerdict ? 'feedback' : 'summary';
+    result.state = hasVerdict ? 'feedback' : 'summary';
+    result.intent = hasVerdict ? '确认迁移证据并结束当前检查' : '按学生意图进入下一内容';
+    result.checkpoint = '查看课堂总结并进入下一节新内容';
+    result.student_task = normalizeStudentTask({ kind: 'none' }, {
+      teacherMove: result.teacher_move, checkpoint: result.checkpoint, knowledgePoint: brief.focus || '',
+    });
+    result.can_advance = true;
+    result.review_scheduled = instructionalDecision.scheduleReview === true;
+    result.actions = [
+      ...(Array.isArray(result.actions) ? result.actions.filter(action => action?.type !== 'advance') : []),
+      { type: 'advance', label: '进入下一节' },
+    ];
+  }
   if (['explain', 'model'].includes(result.teacher_move)) {
     const instruction = validateInstructionBlock(result.instruction_block || result.instructionBlock || {});
     result.instruction_contract = instruction;
     if (!instruction.valid) result.student_state_update = null;
+  }
+  const lessonSummaryGrounded = !brief.lessonStep
+    || brief.lessonStep.phase === 'summary'
+    || brief.masteryGate?.nextRequirement === '本节验证已完成';
+  const visibleCompletionClaim = COMPLETION_CLAIM_RE
+    .test(String(result.message || ''));
+  if (!lessonSummaryGrounded
+    && (result.teacher_move === 'summary' || result.lesson_summary || visibleCompletionClaim)) {
+    const instruction = validateInstructionBlock(result.instruction_block || result.instructionBlock || {});
+    const currentPhase = brief.lessonStep?.phase || 'explain';
+    result.lesson_summary = null;
+    result.can_advance = false;
+    result.actions = Array.isArray(result.actions)
+      ? result.actions.filter(action => action?.type !== 'advance')
+      : [];
+    result.teacher_move = currentPhase === 'explain' ? 'explain' : 'feedback';
+    result.state = currentPhase === 'explain' ? 'explain' : 'feedback';
+    result.intent = '完成当前教案步骤后再判断本节是否结束';
+    result.checkpoint = currentPhase === 'explain'
+      ? '先听老师完成当前知识块的讲解'
+      : `继续完成当前证据要求：${brief.masteryGate?.nextRequirement || brief.lessonStep?.evidence || '完成当前步骤'}`;
+    result.student_task = normalizeStudentTask({ kind: 'none' }, {
+      teacherMove: result.teacher_move,
+      checkpoint: result.checkpoint,
+      knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
+    });
+    if (currentPhase === 'explain' && instruction.valid) {
+      const block = instruction.block;
+      result.message = [
+        block.priorConnection,
+        block.mentalModel,
+        `例子：${block.workedExample}`,
+        block.contrastOrBoundary,
+        block.summary,
+      ].filter(Boolean).join('\n\n');
+      result.instruction_contract = instruction;
+    } else if (currentPhase === 'explain') {
+      result.message = `先继续本节的讲解：${brief.lessonStep?.goal || brief.nextAction || '讲清当前知识点'}。老师会完成讲解和示范后，再进入练习。`;
+    } else {
+      const phaseLabel = currentPhase === 'check' ? '迁移检查' : '练习';
+      const fallbackPrompt = brief.lessonStep?.goal || `完成“${brief.focus || '当前知识点'}”的${phaseLabel}`;
+      result.message = `刚才完成的内容已经保留。当前课时还没有进入总结阶段，接下来继续${phaseLabel}“${fallbackPrompt}”。达到“${brief.masteryGate?.nextRequirement || brief.lessonStep?.evidence || '当前证据要求'}”后，本节会自动收尾。`;
+      result.checkpoint = fallbackPrompt;
+      result.student_task = normalizeStudentTask({
+        kind: currentPhase === 'check' ? 'knowledge_check' : 'practice',
+        prompt: fallbackPrompt,
+        expected_response: currentPhase === 'check' ? '一个无提示的完整答案' : '一段可检查的完整答案或代码',
+        knowledge_point: brief.focus || brief.lessonStep?.goal || '',
+        support_context: 'independent',
+        cadence_role: currentPhase === 'check' ? 'transfer_check' : 'lesson_check',
+      }, {
+        teacherMove: currentPhase === 'check' ? 'question' : 'practice',
+        checkpoint: fallbackPrompt,
+        knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
+      });
+    }
+    result.completion_claim_rejected = true;
   }
   if (preservePendingTask) {
     result.student_task = normalizeStudentTask(pendingStudentTask, {
@@ -600,7 +733,9 @@ export function enforceStudentEvidenceSupport(update, {
   const scaffoldedWarmup = reviewWarmup?.status === 'remediate'
     && ['explain', 'model', 'hint', 'feedback', 'clarify'].includes(String(previousTeacherMove || ''));
   const scaffoldedTask = pendingStudentTask?.supportContext === 'scaffolded';
-  if (!interventionNeedsRecheck && !scaffoldedWarmup && !scaffoldedTask) return update;
+  const explicitIndependentRecheck = pendingStudentTask?.supportContext === 'independent'
+    && pendingStudentTask?.cadenceRole === 'transfer_check';
+  if ((!interventionNeedsRecheck || explicitIndependentRecheck) && !scaffoldedWarmup && !scaffoldedTask) return update;
   const delta = Math.min(0.04, Number(update.delta) || 0.04);
   const mastery = Math.round(Math.min(1, Math.max(0, Number(update.before) + delta)) * 1000) / 1000;
   return { ...update, delta, mastery, supportLevel: 'prompted' };
@@ -1575,18 +1710,62 @@ export function enforceTeacherContinuationPolicy(raw, kind = '', brief = {}, pen
     const result = raw && typeof raw === 'object' ? { ...raw } : {
       message: '', visual: null, actions: [], quick_replies: [], lesson_summary: null,
     };
-    if (!Object.hasOwn(TEACHER_MOVES, String(result.teacher_move || ''))) result.teacher_move = fallback.move;
-    if (!String(result.state || '').trim()) result.state = fallback.state;
-    if (!String(result.intent || '').trim()) result.intent = fallback.intent;
-    if (!String(result.checkpoint || '').trim()) result.checkpoint = fallback.checkpoint;
+    const allowedMoves = phase === 'practice' ? ['practice']
+      : phase === 'check' ? ['question', 'practice']
+        : phase === 'summary' ? ['summary'] : ['explain', 'model'];
+    const summaryGateReached = !brief.lessonStep
+      || brief.lessonStep.phase === 'summary'
+      || brief.masteryGate?.nextRequirement === '本节验证已完成';
+    const rawSummaryClaim = !summaryGateReached && (
+      String(raw?.teacher_move || '') === 'summary'
+      || Boolean(raw?.lesson_summary)
+      || COMPLETION_CLAIM_RE.test(String(raw?.message || ''))
+    );
+    if (rawSummaryClaim) {
+      result.teacher_move = 'summary';
+      result.state = 'summary';
+      result.intent = '根据课堂证据完成收尾';
+      result.checkpoint = '查看复习任务与下节重点';
+      return enforceTeacherTurnPolicy(result, '', brief, pendingStudentTask);
+    }
+    const phaseMismatch = !allowedMoves.includes(String(result.teacher_move || ''));
+    if (phaseMismatch) result.teacher_move = fallback.move;
+    if (phaseMismatch || !String(result.state || '').trim()) result.state = fallback.state;
+    if (phaseMismatch || !String(result.intent || '').trim()) result.intent = fallback.intent;
+    if (phaseMismatch || !String(result.checkpoint || '').trim()) result.checkpoint = fallback.checkpoint;
     result.student_task = normalizeStudentTask(result.student_task, {
       teacherMove: result.teacher_move,
       checkpoint: result.checkpoint,
       knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
     });
+    if (['practice', 'check'].includes(phase)
+      && (!studentTaskAllowsMasteryEvidence(result.student_task) || phaseMismatch)) {
+      const prompt = brief.lessonStep?.goal || (phase === 'check'
+        ? `独立完成“${brief.focus || '当前知识点'}”的迁移检查`
+        : `完成“${brief.focus || '当前知识点'}”的练习`);
+      result.teacher_move = phase === 'check' ? 'question' : 'practice';
+      result.state = phase;
+      result.intent = phase === 'check' ? '完成当前无提示迁移检查' : '完成当前独立练习';
+      result.checkpoint = prompt;
+      result.message = phase === 'check'
+        ? `现在进行本节唯一的迁移检查：${prompt}。请独立完成，不提供提示。`
+        : `现在进入本节练习：${prompt}。完成后老师会根据实际结果反馈。`;
+      result.student_task = normalizeStudentTask({
+        kind: phase === 'check' ? 'knowledge_check' : 'practice',
+        prompt,
+        expected_response: '一个可独立核对的完整答案或代码',
+        knowledge_point: brief.focus || brief.lessonStep?.goal || '',
+        support_context: 'independent',
+        cadence_role: phase === 'check' ? 'transfer_check' : 'lesson_check',
+      }, {
+        teacherMove: result.teacher_move,
+        checkpoint: prompt,
+        knowledgePoint: brief.focus || brief.lessonStep?.goal || '',
+      });
+    }
     result.student_state_update = null;
     result.learning_diagnosis = null;
-    return result;
+    return enforceTeacherTurnPolicy(result, '', brief, pendingStudentTask);
   }
   if (kind === 'checkpoint_reminder') {
     const task = pendingStudentTask && typeof pendingStudentTask === 'object'

@@ -260,6 +260,15 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("normalizeLessonSummary", self.js)
         self.assertIn("lastLessonSummary", self.js)
         self.assertIn("开始下一节", self.js)
+        self.assertIn("继续本节", self.js)
+        self.assertNotIn("先用一句话回顾，再给我一个具体任务", self.js)
+        self.assertIn("不要重复我刚刚已经通过的练习", self.js)
+        self.assertIn("nextStudentTask?.kind === 'none' && teacherNudgeEl", self.js)
+        self.assertNotIn("suspendedStudentTask?.kind !== 'none' && teacherNudgeEl", self.js)
+        self.assertIn("suspendedTaskKind && suspendedTaskKind !== 'none'", self.js)
+        self.assertIn("structured?.message || parsed.message", self.js)
+        self.assertIn("structured?.message || rawMessage", self.js)
+        self.assertIn("visibleKey === previousTeacherVisible", self.js)
         self.assertIn("session.lastLessonSummary?.next_lesson_focus", self.js)
         self.assertIn("skipOpeningWarmup: true", self.js)
         self.assertIn("if (event.currentTarget.dataset.action === 'next-lesson')", self.js)
@@ -392,7 +401,7 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("lastProactiveNudgeKey", self.js)
         self.assertIn("{ hideStudentMessage: true, internalCommand: true }", self.js)
         self.assertIn("不要等待学生先提问", self.js)
-        self.assertIn("学生暂时没有继续", self.js)
+        self.assertNotIn("学生暂时没有继续", self.js)
         self.assertIn("assessTeacherTurnQuality", self.js)
         self.assertIn("verifiedStudentStateUpdate", self.js)
         self.assertIn("teacher_quality_warning", self.js)
@@ -430,9 +439,10 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("pendingStudentTask: respondingStudentTask", self.js)
         self.assertIn("respondingToTask", self.js)
         self.assertIn("pendingStudentTask: nextStudentTask", self.js)
-        self.assertIn("continuationKind: 'checkpoint_reminder'", self.js)
-        self.assertIn("提醒我原任务", self.js)
-        self.assertIn("不提出第二个问题", self.js)
+        self.assertNotIn("continuationKind: 'checkpoint_reminder'", self.js)
+        self.assertIn("继续练习", self.js)
+        self.assertIn("setTaskPanelCollapsed(false", self.js)
+        self.assertNotIn("不提出第二个问题", self.js)
         self.assertNotIn("给我一个两分钟内能完成的小任务", self.js)
 
     def test_active_task_stays_adjacent_to_the_teacher_message(self):
@@ -587,6 +597,21 @@ class DesktopShellContractTests(unittest.TestCase):
         self.assertIn("需要换用", self.js)
         self.assertIn("longitudinal_profile.teachingMemory", backend)
         self.assertIn("避开连续困难的策略", backend)
+
+    def test_paused_task_resume_is_local_and_never_creates_a_teacher_message(self):
+        nudge_start = self.js.index("function scheduleProactiveNudge")
+        nudge_end = self.js.index("const submitCurrentTask", nudge_start)
+        nudge_slice = self.js[nudge_start:nudge_end]
+        self.assertIn("teacherNudgeEl.hidden = false", nudge_slice)
+        self.assertNotIn("void send(", nudge_slice)
+        self.assertNotIn("学生暂时没有继续", nudge_slice)
+
+        handler_start = self.js.index("teacherNudgeEl?.addEventListener")
+        handler_end = self.js.index("sendBtn.addEventListener", handler_start)
+        handler_slice = self.js[handler_start:handler_end]
+        self.assertIn("renderClassroomWorkspace({ preserveAnswer: true })", handler_slice)
+        self.assertIn("setTaskPanelCollapsed(false", handler_slice)
+        self.assertNotIn("continuationKind: 'checkpoint_reminder'", handler_slice)
 
 
 if __name__ == "__main__":

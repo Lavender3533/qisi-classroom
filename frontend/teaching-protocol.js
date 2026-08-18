@@ -1,5 +1,17 @@
 export const SAFE_TEACHER_RESPONSE_FALLBACK = '老师这次的回复格式不完整，请重新发送。';
 
+// 部分网关/思维链模型会把内部安全分类包装（<ds_safety>…</ds_safety>）或
+// ".vrtx" 等路由残留泄漏进可见回复；展示与解析前统一剥离。
+export function stripModelSafetyWrappers(value) {
+  const stripped = String(value ?? '')
+    .replace(/<ds_safety>[\s\S]*?<\/ds_safety>/giu, '')
+    .replace(/<ds[^>]*>[\s\S]*?<\/ds[^>]*>/giu, '')
+    .replace(/^\.vrtx\b/iu, '')
+    .trim();
+  if (/^(safe|vrtx)?$/iu.test(stripped)) return '';
+  return stripped;
+}
+
 function normalizeSmartJsonKeys(value) {
   return String(value || '').replace(
     /(^|[{,]\s*)[“”]([^“”:\r\n]+)[“”]\s*:/gu,
@@ -93,7 +105,7 @@ function looksLikeInternalTeacherProtocol(value) {
 }
 
 export function parseAIResponse(text) {
-  const source = String(text ?? '');
+  const source = stripModelSafetyWrappers(text);
   const fencedMatch = source.match(/```json\s*([\s\S]*?)```/iu);
   const candidates = [];
   if (fencedMatch?.[1]) {

@@ -24,6 +24,9 @@ export function buildConfigPayload(current, fields) {
     models: {
       ...current.models,
       chat: fields.chatModel,
+      // 设置界面只暴露聊天模型；切换网关后沿用旧网关的 fast 模型会导致
+      // 科目命名、独立判卷等子任务请求 4xx。让 fast 跟随 chat，保证同一网关内可用。
+      fast: fields.chatModel,
     },
   };
 }

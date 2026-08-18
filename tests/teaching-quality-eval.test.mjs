@@ -11,12 +11,41 @@ const instructionBlock = {
 test('healthy replay teaches, transfers, and stops without another task', () => {
   const replay = evaluateTeachingReplay([
     { role: 'assistant', teacher_move: 'explain', instruction_block: instructionBlock, knowledge_point: '前置与后置自增', student_task: { kind: 'none' } },
+    { role: 'user', message: '我理解表达式值和变量值是两件事了' },
     { role: 'assistant', teacher_move: 'question', knowledge_point: '前置与后置自增', evidence_stage: 'transferred', correct: true, student_task: { kind: 'none' } },
-    { role: 'assistant', teacher_move: 'summary', knowledge_point: '下一知识点', student_task: { kind: 'none' } },
+    { role: 'assistant', teacher_move: 'summary', knowledge_point: '下一知识点', checkpoint: '进入下一节新内容', can_advance: true, student_task: { kind: 'none' } },
   ]);
   assert.equal(replay.passed, true);
   assert.equal(replay.stopDelay, 0);
   assert.equal(replay.explanationCompleteness, 1);
+});
+
+test('student experience gate rejects teacher monologue streaks and missing next lesson exit', () => {
+  const replay = evaluateTeachingReplay([
+    { role: 'user', message: '我看完了' },
+    { role: 'assistant', teacher_move: 'practice', student_task: { kind: 'practice', prompt: '判断 p.show() 的输出' } },
+    { role: 'assistant', teacher_move: 'practice', student_task: { kind: 'practice', prompt: '判断 p.show() 的输出' } },
+    { role: 'assistant', teacher_move: 'summary', message: '本节结束', checkpoint: '查看复习安排', student_task: { kind: 'none' } },
+  ]);
+  assert.equal(replay.passed, false);
+  assert.equal(replay.longestTeacherStreak, 3);
+  assert.equal(replay.summariesWithoutNextStep, 1);
+});
+
+test('student experience gate rejects a substantial lesson dominated by tasks', () => {
+  const task = index => ({
+    role: 'assistant', teacher_move: 'question', knowledge_point: `知识点${index}`,
+    student_task: { kind: 'knowledge_check', prompt: `计算第${index}个不同问题` },
+  });
+  const replay = evaluateTeachingReplay([
+    { role: 'assistant', teacher_move: 'explain', instruction_block: instructionBlock, student_task: { kind: 'none' } },
+    { role: 'user', message: '继续' }, task(1), { role: 'user', message: '1' }, task(2),
+    { role: 'user', message: '2' }, task(3), { role: 'user', message: '3' }, task(4),
+    { role: 'user', message: '4' }, task(5), { role: 'user', message: '5' },
+  ]);
+  assert.equal(replay.passed, false);
+  assert.ok(replay.taskRate > 0.45);
+  assert.ok(replay.explanationToTaskRatio < 0.25);
 });
 
 test('replay rejects repeated task chains and checks after transfer', () => {

@@ -389,7 +389,7 @@ async fn check_api_health(base_url: String, api_key: String, model: Option<Strin
     let models_result = client
         .get(&models_url)
         .header("Authorization", &auth)
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await;
 
@@ -405,7 +405,7 @@ async fn check_api_health(base_url: String, api_key: String, model: Option<Strin
                     if let Ok(v1_response) = client
                         .get(&v1_models_url)
                         .header("Authorization", &auth)
-                        .timeout(std::time::Duration::from_secs(5))
+                        .timeout(std::time::Duration::from_secs(10))
                         .send()
                         .await
                     {
@@ -442,15 +442,16 @@ async fn check_api_health(base_url: String, api_key: String, model: Option<Strin
     let probe_body = serde_json::json!({
         "model": probe_model,
         "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
+        "max_tokens": 8,
         "stream": false
     });
 
+    // 思维链模型（如 deepseek-v4-pro-free）单次请求可达数十秒，探测超时需足够宽松。
     match client
         .post(&chat_url)
         .header("Authorization", &auth)
         .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(45))
         .json(&probe_body)
         .send()
         .await
@@ -1021,21 +1022,19 @@ async fn generate_assessment(
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(240))
         .json(&body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let content = data["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("{}");
+    let content = message_text(&data["choices"][0]["message"]).unwrap_or_else(|| "{}".into());
 
     // 尝试提取 JSON（AI 有时会包裹在 markdown 代码块里）
     let json_str = if let Some(start) = content.find('{') {
         if let Some(end) = content.rfind('}') {
-            &content[start..=end]
+            content[start..=end].to_string()
         } else {
             content
         }
@@ -1043,7 +1042,7 @@ async fn generate_assessment(
         content
     };
 
-    Ok(json_str.to_string())
+    Ok(json_str)
 }
 
 fn build_lesson_plan_prompt(subject: &str, learning_profile_json: &str) -> String {
@@ -1093,7 +1092,7 @@ async fn generate_lesson_plan(
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(240))
         .json(&serde_json::json!({"model": model, "messages": messages, "stream": false}))
         .send()
         .await
@@ -1105,13 +1104,11 @@ async fn generate_lesson_plan(
         .json()
         .await
         .map_err(|e| format!("教案响应解析失败: {}", e))?;
-    let content = data["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("{}");
+    let content = message_text(&data["choices"][0]["message"]).unwrap_or_else(|| "{}".into());
     let json_str = content
         .find('{')
         .and_then(|start| content.rfind('}').map(|end| &content[start..=end]))
-        .unwrap_or(content);
+        .unwrap_or(&content);
     Ok(json_str.to_string())
 }
 
@@ -2448,7 +2445,7 @@ async fn verify_student_answer(
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(180))
         .json(&body)
         .send()
         .await
@@ -2460,13 +2457,11 @@ async fn verify_student_answer(
         .json()
         .await
         .map_err(|e| format!("独立判卷响应解析失败: {}", e))?;
-    let content = data["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
+    let content = message_text(&data["choices"][0]["message"]).unwrap_or_default();
     let json_str = content
         .find('{')
         .and_then(|start| content.rfind('}').map(|end| &content[start..=end]))
-        .unwrap_or(content)
+        .unwrap_or(&content)
         .trim();
     if json_str.is_empty() {
         return Err("独立判卷没有返回有效内容".into());
@@ -2538,7 +2533,7 @@ async fn review_teacher_turn(
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(75))
+        .timeout(std::time::Duration::from_secs(180))
         .json(&body)
         .send()
         .await
@@ -2550,13 +2545,11 @@ async fn review_teacher_turn(
         .json()
         .await
         .map_err(|e| format!("教学复核响应解析失败: {}", e))?;
-    let content = data["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
+    let content = message_text(&data["choices"][0]["message"]).unwrap_or_default();
     let json_str = content
         .find('{')
         .and_then(|start| content.rfind('}').map(|end| &content[start..=end]))
-        .unwrap_or(content)
+        .unwrap_or(&content)
         .trim();
     if json_str.is_empty() {
         return Err("教学复核没有返回有效内容".into());
@@ -2564,39 +2557,66 @@ async fn review_teacher_turn(
     Ok(json_str.to_string())
 }
 
-fn emit_chat_payload(app: &tauri::AppHandle, request_id: &str, data: &str) -> bool {
+/// 读取一条模型消息的正文。思维链模型（如 deepseek-v4-pro-free）偶发把全部内容
+/// 放在 reasoning_content 而 content 为 null；此时回退到推理文本尾部，避免课堂收到空回复。
+fn message_text(message: &serde_json::Value) -> Option<String> {
+    if let Some(content) = message.get("content").and_then(|value| value.as_str()) {
+        if !content.trim().is_empty() {
+            return Some(content.to_string());
+        }
+    }
+    let reasoning = message
+        .get("reasoning_content")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let tail: String = reasoning.chars().rev().take(1500).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    if tail.trim().is_empty() {
+        None
+    } else {
+        Some(tail)
+    }
+}
+
+fn emit_chat_payload(
+    app: &tauri::AppHandle,
+    request_id: &str,
+    data: &str,
+) -> (bool, Option<String>, Option<String>) {
     if data.trim() == "[DONE]" {
-        let _ = app.emit(
-            "chat-stream",
-            serde_json::json!({"requestId": request_id, "type": "done"}),
-        );
-        return true;
+        // 由调用方在确认回复非空后统一发送 done，避免空回复被当成成功结束。
+        return (true, None, None);
     }
 
     let Ok(obj) = serde_json::from_str::<serde_json::Value>(data) else {
-        return false;
+        return (false, None, None);
     };
     let Some(choice) = obj
         .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|c| c.first())
     else {
-        return false;
+        return (false, None, None);
     };
     let payload = choice.get("delta").or_else(|| choice.get("message"));
-    if let Some(payload) = payload {
-        if let Some(reasoning) = payload.get("reasoning_content").and_then(|v| v.as_str()) {
-            if !reasoning.is_empty() {
-                let _ = app.emit("chat-stream", serde_json::json!({"requestId": request_id, "type": "reasoning", "text": reasoning}));
-            }
-        }
-        if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
-            if !content.is_empty() {
-                let _ = app.emit("chat-stream", serde_json::json!({"requestId": request_id, "type": "content", "text": content}));
-            }
+    let Some(payload) = payload else {
+        return (false, None, None);
+    };
+    let mut content_text = None;
+    let mut reasoning_text = None;
+    if let Some(reasoning) = payload.get("reasoning_content").and_then(|v| v.as_str()) {
+        if !reasoning.is_empty() {
+            let _ = app.emit("chat-stream", serde_json::json!({"requestId": request_id, "type": "reasoning", "text": reasoning}));
+            reasoning_text = Some(reasoning.to_string());
         }
     }
-    false
+    if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+        if !content.is_empty() {
+            let _ = app.emit("chat-stream", serde_json::json!({"requestId": request_id, "type": "content", "text": content}));
+            content_text = Some(content.to_string());
+        }
+    }
+    (false, content_text, reasoning_text)
 }
 
 #[tauri::command]
@@ -2619,48 +2639,149 @@ async fn send_chat_stream(
     });
 
     let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(60))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        return Err(format!("HTTP {}", status));
-    }
-
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !content_type.contains("text/event-stream") {
-        let body = response
-            .text()
+    // 免费/共享网关偶发 402、429、5xx 甚至完全空回复：整体重试并退避，
+    // 避免一次抖动就打断课堂；正文读取改为逐块超时，长回答不被中途掐断。
+    for attempt in 0..3 {
+        let response = match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(600))
+            .json(&body)
+            .send()
             .await
-            .map_err(|e| format!("响应读取错误: {}", e))?;
-        let has_content = serde_json::from_str::<serde_json::Value>(body.trim())
-            .ok()
-            .and_then(|obj| {
-                obj.get("choices")?
-                    .as_array()?
-                    .first()?
-                    .get("message")?
-                    .get("content")?
-                    .as_str()
-                    .map(|text| !text.is_empty())
-            })
-            .unwrap_or(false);
-        if !has_content {
-            return Err("模型返回了无法识别的响应，请检查模型网关兼容性".into());
+        {
+            Ok(resp) => resp,
+            Err(error) => {
+                if attempt == 2 {
+                    return Err(format!("请求失败: {}", error));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1200 * (attempt as u64 + 1))).await;
+                continue;
+            }
+        };
+
+        let status = response.status().as_u16();
+        if matches!(status, 402 | 408 | 409 | 429 | 500..=599) && attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(1200 * (attempt as u64 + 1))).await;
+            continue;
         }
-        emit_chat_payload(&app, &request_id, body.trim());
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", status));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
+            let body = response
+                .text()
+                .await
+                .map_err(|e| format!("响应读取错误: {}", e))?;
+            let has_content = serde_json::from_str::<serde_json::Value>(body.trim())
+                .ok()
+                .and_then(|obj| {
+                    obj.get("choices")?
+                        .as_array()?
+                        .first()?
+                        .get("message")
+                        .and_then(message_text)
+                })
+                .map(|text| !text.is_empty())
+                .unwrap_or(false);
+            if !has_content {
+                if attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1200 * (attempt as u64 + 1))).await;
+                    continue;
+                }
+                return Err("模型返回了无法识别的响应，请检查模型网关兼容性".into());
+            }
+            let (_, content_emitted, reasoning_emitted) = emit_chat_payload(&app, &request_id, body.trim());
+            // 思考型网关偶发只返回 reasoning_content：把推理尾部作为可见回复兜底。
+            if content_emitted.is_none() {
+                if let Some(reasoning) = reasoning_emitted {
+                    let _ = app.emit("chat-stream", serde_json::json!({"requestId": request_id, "type": "content", "text": reasoning}));
+                }
+            }
+            let _ = app.emit(
+                "chat-stream",
+                serde_json::json!({"requestId": request_id, "type": "done"}),
+            );
+            return Ok(());
+        }
+
+        let mut stream = response.bytes_stream();
+        use futures_util::StreamExt;
+        let mut buffer = String::new();
+        let mut received_content = false;
+        let mut last_reasoning = String::new();
+        let mut stream_done = false;
+
+        // 思维链模型在思考阶段可能长时间不发流块；逐块超时能区分“慢”与“断流”。
+        while let Some(chunk_result) = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            stream.next(),
+        )
+        .await
+        .map_err(|_| "模型响应中断：长时间没有收到数据".to_string())?
+        {
+            let chunk = chunk_result.map_err(|e| format!("流读取错误: {}", e))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+                if !line.starts_with("data:") {
+                    continue;
+                }
+                let data = line[5..].trim();
+                let (done, content, reasoning) = emit_chat_payload(&app, &request_id, data);
+                if content.is_some() {
+                    received_content = true;
+                }
+                if let Some(reasoning) = reasoning {
+                    last_reasoning = reasoning;
+                }
+                if done {
+                    stream_done = true;
+                    break;
+                }
+            }
+            if stream_done {
+                break;
+            }
+        }
+
+        let tail = buffer
+            .trim()
+            .strip_prefix("data:")
+            .unwrap_or(buffer.trim())
+            .trim();
+        if !tail.is_empty() && tail != "[DONE]" {
+            let (_, content, reasoning) = emit_chat_payload(&app, &request_id, tail);
+            if content.is_some() {
+                received_content = true;
+            }
+            if let Some(reasoning) = reasoning {
+                last_reasoning = reasoning;
+            }
+        }
+        if !received_content {
+            if !last_reasoning.is_empty() {
+                let _ = app.emit("chat-stream", serde_json::json!({"requestId": request_id, "type": "content", "text": last_reasoning}));
+            } else if attempt < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(1200 * (attempt as u64 + 1))).await;
+                continue;
+            }
+        }
+
         let _ = app.emit(
             "chat-stream",
             serde_json::json!({"requestId": request_id, "type": "done"}),
@@ -2668,45 +2789,7 @@ async fn send_chat_stream(
         return Ok(());
     }
 
-    let mut stream = response.bytes_stream();
-    use futures_util::StreamExt;
-    let mut buffer = String::new();
-
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("流读取错误: {}", e))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim().to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
-            if line.is_empty() {
-                continue;
-            }
-            if !line.starts_with("data:") {
-                continue;
-            }
-            let data = line[5..].trim();
-            if emit_chat_payload(&app, &request_id, data) {
-                return Ok(());
-            }
-        }
-    }
-
-    let tail = buffer
-        .trim()
-        .strip_prefix("data:")
-        .unwrap_or(buffer.trim())
-        .trim();
-    if !tail.is_empty() {
-        emit_chat_payload(&app, &request_id, tail);
-    }
-
-    let _ = app.emit(
-        "chat-stream",
-        serde_json::json!({"requestId": request_id, "type": "done"}),
-    );
-    Ok(())
+    Err("模型多次返回空回复，请稍后重试".into())
 }
 
 // ============ 笔记命令 ============

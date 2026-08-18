@@ -139,6 +139,24 @@ export function projectMasteryFromEvidence(recordsOrStage, { legacyMastery = 0, 
   return Math.round(base * boundedConfidence * 100) / 100;
 }
 
+export function deriveTaskEvidenceStage({
+  instructionValid = false,
+  studentUpdate = null,
+  task = null,
+  lessonPhase = '',
+} = {}) {
+  if (instructionValid && !studentUpdate) return 'introduced';
+  if (!studentUpdate) return null;
+  const supportLevel = text(studentUpdate.supportLevel ?? studentUpdate.support_level ?? 'none', 32).toLowerCase();
+  const correct = Number(studentUpdate.delta ?? studentUpdate.mastery_delta) > 0;
+  const supportContext = text(task?.supportContext ?? task?.support_context, 32).toLowerCase();
+  const cadenceRole = text(task?.cadenceRole ?? task?.cadence_role, 40).toLowerCase();
+  if (supportLevel === 'prompted' || supportContext === 'scaffolded') return 'guided';
+  if (correct && supportContext === 'independent' && cadenceRole === 'transfer_check') return 'transferred';
+  if (correct && String(lessonPhase).toLowerCase() === 'check') return 'transferred';
+  return 'independent';
+}
+
 export function decideInstructionalAction(input = {}) {
   const intent = text(input.studentIntent, 40).toLowerCase();
   const stage = text(input.stage || 'unknown', 32).toLowerCase();

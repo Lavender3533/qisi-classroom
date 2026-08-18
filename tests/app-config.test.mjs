@@ -24,7 +24,7 @@ test('connectionPresentation distinguishes online from configuration failures', 
   });
 });
 
-test('buildConfigPayload updates gateway and chat model without dropping task routes', () => {
+test('buildConfigPayload keeps the fast route aligned with the chat model after a gateway switch', () => {
   const current = {
     base_url: 'http://old.example',
     api_key: 'old-key',
@@ -45,7 +45,8 @@ test('buildConfigPayload updates gateway and chat model without dropping task ro
   assert.equal(payload.base_url, 'http://new.example');
   assert.equal(payload.api_key, 'new-key');
   assert.equal(payload.models.chat, 'new-chat');
-  assert.equal(payload.models.fast, 'fast-model');
+  // 旧网关的 fast 模型名在新网关上通常不存在，必须跟随 chat 一起切换。
+  assert.equal(payload.models.fast, 'new-chat');
   assert.equal(payload.models.vision, 'vision-model');
   assert.equal(payload.models.tts, 'tts-model');
 });
